@@ -20,11 +20,12 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from sys import modules as _modules
-from typing import Any
+from typing import Any, Callable
 
 from .fleet_update_state import TIER_SPECS, tier_status
 from .legacy_fleet_definitions import FLEET_DESCRIPTION
 from .scheduler_retirement import (
+    CommandOutcome, SchedulerRunner, TaskConfigWriter,
     RetirementBusy,
     require_linux_retirement,
     require_registration_policy,
@@ -165,14 +166,17 @@ def _ps_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _powershell_binary(resolve_binary) -> str:
+def _powershell_binary(resolve_binary: Callable[[str], str | None]) -> str:
     binary = resolve_binary("pwsh") or resolve_binary("powershell")
     if binary is None:
         raise RuntimeError("pwsh or powershell is required to manage Scheduled Tasks")
     return binary
 
 
-def _run_powershell(script: str, *, runner, resolve_binary, timeout: int = 300):
+def _run_powershell(
+    script: str, *, runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None], timeout: int = 300,
+) -> CommandOutcome:
     return runner(
         [
             _powershell_binary(resolve_binary),
@@ -219,8 +223,8 @@ def _snapshot_from_payload(
 def query_scheduled_task(
     tier: str,
     *,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
 ) -> ScheduledTaskSnapshot:
     task_name = TIER_SPECS[tier].task_name
@@ -289,10 +293,10 @@ if ($trigger.PSObject.TypeNames -contains {_ps_literal(daily_trigger_type)}) {{
 def register_scheduled_task(
     tier: str,
     *,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
-):
+) -> CommandOutcome:
     tasks = _modules[__name__]
     require_registration_policy("fleet", home)
     snapshot = query_scheduled_task(tier, runner=runner, resolve_binary=resolve_binary, home=home)
@@ -301,7 +305,10 @@ def register_scheduled_task(
     return _run_powershell(script, runner=runner, resolve_binary=resolve_binary, timeout=300)
 
 
-def enable_scheduled_task(tier: str, *, runner, resolve_binary, home: Path | None = None):
+def enable_scheduled_task(
+    tier: str, *, runner: SchedulerRunner, resolve_binary: Callable[[str], str | None],
+    home: Path | None = None,
+) -> CommandOutcome:
     require_registration_policy("fleet", home)
     snapshot = query_scheduled_task(tier, runner=runner, resolve_binary=resolve_binary, home=home)
     require_windows_retirement("fleet", _modules[__name__], snapshot, tier, home=home)
@@ -316,7 +323,10 @@ Enable-ScheduledTask -TaskName {_ps_literal(task_name)} -ErrorAction Stop | Out-
     return _run_powershell(script, runner=runner, resolve_binary=resolve_binary, timeout=180)
 
 
-def unregister_scheduled_task(tier: str, *, runner, resolve_binary, home: Path | None = None):
+def unregister_scheduled_task(
+    tier: str, *, runner: SchedulerRunner, resolve_binary: Callable[[str], str | None],
+    home: Path | None = None,
+) -> CommandOutcome:
     tasks = _modules[__name__]
     snapshot = query_scheduled_task(tier, runner=runner, resolve_binary=resolve_binary, home=home)
     require_windows_retirement("fleet", tasks, snapshot, tier, home=home)
@@ -421,7 +431,9 @@ def render_linux_timer_unit(tier: str) -> str:
     )
 
 
-def linux_systemd_user_available(*, resolve_binary, runner) -> bool:
+def linux_systemd_user_available(
+    *, resolve_binary: Callable[[str], str | None], runner: SchedulerRunner,
+) -> bool:
     if resolve_binary("systemctl") is None:
         return False
     try:
@@ -435,8 +447,8 @@ def linux_systemd_user_available(*, resolve_binary, runner) -> bool:
 def query_systemd_timer(
     tier: str,
     *,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
 ) -> ScheduledTaskSnapshot:
     task_name = _linux_timer_name(tier)
@@ -450,6 +462,8 @@ def query_systemd_timer(
     state = active_result.stdout.strip() or None
     expected_service = render_linux_service_unit(tier, home=home)
     expected_timer = render_linux_timer_unit(tier)
+    actual_service: str | None
+    actual_timer: str | None
     try:
         actual_service = service_path.read_text(encoding="utf-8")
         actual_timer = timer_path.read_text(encoding="utf-8")
@@ -478,10 +492,10 @@ def query_systemd_timer(
 def register_systemd_timer(
     tier: str,
     *,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
-):
+) -> CommandOutcome:
     require_registration_policy("fleet", home)
     require_linux_retirement(
         "fleet", _modules[__name__], tier, runner=runner, home=home,
@@ -501,10 +515,10 @@ def register_systemd_timer(
 def unregister_systemd_timer(
     tier: str,
     *,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
-):
+) -> CommandOutcome:
     require_linux_retirement(
         "fleet", _modules[__name__], tier, runner=runner, home=home,
     )
@@ -525,9 +539,9 @@ def _reconcile_linux_timer(
     tier: str,
     *,
     desired_present: bool,
-    runner,
-    resolve_binary,
-    record_task_config,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
+    record_task_config: TaskConfigWriter,
     home: Path | None = None,
 ) -> ScheduledTaskReconcileResult:
     desired_state = "present" if desired_present else "absent"
@@ -641,8 +655,8 @@ def _linux_timer_status(
     tier: str,
     *,
     opted_in: bool,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
 ) -> ScheduledTaskStatus:
     observed = tier_status(home, tier)
@@ -687,9 +701,9 @@ def reconcile_scheduled_task(
     tier: str,
     *,
     desired_present: bool,
-    runner,
-    resolve_binary,
-    record_task_config,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
+    record_task_config: TaskConfigWriter,
     home: Path | None = None,
 ) -> ScheduledTaskReconcileResult:
     if sys.platform == "linux":
@@ -843,8 +857,8 @@ def scheduled_task_status(
     tier: str,
     *,
     opted_in: bool,
-    runner,
-    resolve_binary,
+    runner: SchedulerRunner,
+    resolve_binary: Callable[[str], str | None],
     home: Path | None = None,
 ) -> ScheduledTaskStatus:
     observed = tier_status(home, tier)

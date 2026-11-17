@@ -9,6 +9,7 @@ so a requirement package can opt a machine into the scheduled
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 from . import fleet_update as _fleet_update
 from .automatic_update_ownership import read_update_ownership
@@ -26,7 +27,7 @@ from .resources import (
 class FleetUpdateResourceHandler(ResourceHandler):
     TYPE = "fleet-update"
 
-    def identity(self, decl: dict[str, Any]) -> tuple:
+    def identity(self, decl: dict[str, Any]) -> tuple[str, str]:
         return (self.TYPE, str(decl.get("tier")))
 
     def display_id(self, decl: dict[str, Any]) -> str:
@@ -62,6 +63,7 @@ class FleetUpdateResourceHandler(ResourceHandler):
             )
         if decision:
             decisions.append(decision)
+            assert info is not None
             findings.append(info)
         return {
             "tier": ident[1],
@@ -90,7 +92,9 @@ class FleetUpdateResourceHandler(ResourceHandler):
                 blocked_reason=None if refused else detail,
             )
 
-        def runner(argv: list[str], *, cwd=None, timeout=1800):
+        def runner(
+            argv: list[str], *, cwd: Path | None = None, timeout: int = 1800,
+        ) -> _fleet_update.CommandResult:
             _ = cwd, timeout
             outcome = ctx.runner(argv)
             return _fleet_update.CommandResult(

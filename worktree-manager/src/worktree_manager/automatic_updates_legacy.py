@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from agent_procutil import no_window_kwargs
 
@@ -16,7 +17,7 @@ LEGACY_NAME = "agent-machines-fleet-update-sweep"
 SELF_NAME = "agent-machines-self-update-sweep"
 
 
-def installed_inventory() -> dict | None:
+def installed_inventory() -> dict[str, Any] | None:
     """Use Agent Machines' public read-only seam when it is installed."""
     from . import agent_plugin_runtime
     from .automatic_updates_process import update_environment

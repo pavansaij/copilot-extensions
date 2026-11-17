@@ -38,15 +38,14 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
-try:  # tomllib is stdlib on 3.11+; tomli backports it for this repo's
-    # 3.10 support floor -- mirrors tools/uv_editable_ref.py's own
-    # identical fallback (this module's hand-maintained-copy rationale
-    # applies to that import choice too, not just the expansion logic).
+# Keep the tooling reader's Python 3.10 parser compatibility.
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised only on 3.10
+else:  # pragma: no cover - exercised only on 3.10
     import tomli as tomllib
 
 POINTER_NAME = "VENDOR_POINTER.json"
@@ -127,7 +126,7 @@ def _remove_path(p: Path) -> None:
         p.unlink()
 
 
-def _observed_copy(on_file: Callable[[Path], None] | None) -> Callable:
+def _observed_copy(on_file: Callable[[Path], None] | None) -> Callable[[str, str], str]:
     def copy(origin: str, destination: str) -> str:
         result = shutil.copy2(origin, destination)
         if on_file is not None:

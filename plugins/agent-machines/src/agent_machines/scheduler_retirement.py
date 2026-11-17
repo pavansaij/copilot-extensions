@@ -8,10 +8,33 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from .automatic_update_ownership import read_update_ownership
 from .legacy_fleet_definitions import historical_linux_bodies, historical_windows_arguments
+
+_Snapshot = TypeVar("_Snapshot")
+
+
+class CommandOutcome(Protocol):
+    argv: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def output(self) -> str: ...
+
+
+class SchedulerRunner(Protocol):
+    def __call__(self, argv: list[str], *, timeout: int = 300) -> CommandOutcome: ...
+
+
+class TaskConfigWriter(Protocol):
+    def __call__(
+        self, home: Path | None, tier: str, *, installed: bool, opted_in: bool,
+        attempted_elevation: bool,
+    ) -> None: ...
 
 
 class RetirementRefused(RuntimeError):
@@ -136,11 +159,12 @@ def live_tier_lock_owner(kind: str, tier: str, home: Path | None) -> int | None:
     if os.name == "nt":
         import ctypes
 
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        kernel = getattr(ctypes, "windll").kernel32
+        handle = kernel.OpenProcess(0x1000, False, pid)
         if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel.CloseHandle(handle)
             return pid
-        error = ctypes.windll.kernel32.GetLastError()
+        error = kernel.GetLastError()
         if error != 87:  # ERROR_INVALID_PARAMETER means the process no longer exists.
             raise RetirementRefused(f"legacy lock process query failed with Windows error {error}")
         return None
@@ -171,10 +195,10 @@ def owned_windows_arguments(
 
 
 def windows_task_snapshot(
-    snapshot_type: Callable[..., Any],
+    snapshot_type: Callable[..., _Snapshot],
     task_name: str,
     payload: dict[str, Any],
-) -> Any:
+) -> _Snapshot:
     if type(payload.get("present")) is not bool:
         raise RetirementRefused("Scheduled Task query returned no boolean presence evidence")
     strings = {

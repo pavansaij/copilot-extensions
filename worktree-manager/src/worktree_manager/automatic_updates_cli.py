@@ -105,7 +105,7 @@ def _os_account_home() -> Path:
         import ctypes
         from ctypes import wintypes
 
-        library = ctypes.WinDLL("shell32", winmode=0x800)
+        library = getattr(ctypes, "WinDLL")("shell32", winmode=0x800)
         resolve = library.SHGetFolderPathW
         resolve.argtypes = [
             wintypes.HWND, ctypes.c_int, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
@@ -119,7 +119,7 @@ def _os_account_home() -> Path:
         import pwd
 
         try:
-            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            home = Path(getattr(pwd, "getpwuid")(getattr(os, "getuid")()).pw_dir)
         except (KeyError, OSError) as exc:
             raise PolicyError(f"cannot determine the operating-system account home: {exc}") from exc
     if not home.is_absolute():

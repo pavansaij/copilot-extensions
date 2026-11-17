@@ -11,8 +11,9 @@ import secrets
 import signal
 import subprocess
 import time
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent_procutil import DaemonSpawnError
 from agent_procutil.daemon_broker import WindowsDaemonProcess
@@ -26,6 +27,7 @@ from .automatic_updates_policy import PolicyError, atomic_json, load_policy, sta
 log = logging.getLogger(__name__)
 POLL_SECONDS = 5.0
 CYCLE_BUDGET_SECONDS = 3600.0
+_WorkerRun = Callable[["Worker"], Coroutine[Any, Any, int]]
 
 
 class Worker:
@@ -45,7 +47,7 @@ class Worker:
         }
         self.restart_after = 0.0
         self.stop_requested = asyncio.Event()
-        self._native_candidate: subprocess.Popen | WindowsDaemonProcess | None = None
+        self._native_candidate: subprocess.Popen[bytes] | WindowsDaemonProcess | None = None
 
     def request_stop(self) -> None:
         self.snapshot["stop_requested"] = True
@@ -250,10 +252,10 @@ class Worker:
             "successor failed activation; old worker retained", state="replacement-recovered",
         )
 
-    @daemon_entrypoint(
+    @cast(Callable[[_WorkerRun], _WorkerRun], daemon_entrypoint(
         "worktree-manager-automatic-updates", source=__file__,
         runtime_root=lambda self: self.root, purpose="production",
-    )
+    ))
     async def run(self) -> int:
         if load_policy(self.root).owner != "manager":
             raise PolicyError("Manager automatic maintenance is not enabled")
@@ -323,9 +325,9 @@ class Worker:
             await server.wait_closed()
             if candidate_path is not None:
                 candidate_path.unlink(missing_ok=True)
-            for sig, previous in previous_signals.items():
+            for sig, previous_signal in previous_signals.items():
                 loop.remove_signal_handler(sig)
-                signal.signal(sig, previous)
+                signal.signal(sig, previous_signal)
 
 
 def run_worker(root: Path, *, standby: str | None = None) -> int:

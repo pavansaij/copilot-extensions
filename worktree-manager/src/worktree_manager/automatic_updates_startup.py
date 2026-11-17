@@ -150,7 +150,7 @@ def startup(root: Path) -> int:
         return subprocess.run(
             command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
             stdout=output, stderr=subprocess.STDOUT, timeout=90, check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW"),
         ).returncode
 
 

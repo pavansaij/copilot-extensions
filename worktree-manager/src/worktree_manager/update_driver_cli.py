@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
-    from update_driver import Request
+    from update_driver import Request, RequestSpec
 
 from .engine_acquisition_budget import TIMEOUT_ENV, acquisition_timeout
 
@@ -229,7 +229,7 @@ def _unattended_request(request: Request) -> bool:
     )
 
 
-def _retained_automatic_trigger(arguments: list[str], spec) -> list[str]:
+def _retained_automatic_trigger(arguments: list[str], spec: RequestSpec) -> list[str]:
     if spec.backend != "manager":
         return arguments
     retained, _ = parse_options(list(spec.argv))

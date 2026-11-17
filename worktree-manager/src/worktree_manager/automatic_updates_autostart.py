@@ -4,23 +4,43 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from typing import Iterator
+from typing import ContextManager, Iterator, Protocol, cast
 
 from agent_procutil import no_window_kwargs, windowless_python
 
 from . import automatic_updates_startup as startup
-from .mux_mapping_registry import _try_lock_file_once, _unlock_file
+from .mux_file_lock import _try_lock_file_once, _unlock_file
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SCHEMA = startup.AUTOSTART_SCHEMA
 _RUN_MAX_UTF16_UNITS = 260
 UNIT_ENV = "WORKTREE_MANAGER_AUTOMATIC_UPDATES_UNIT"
+
+
+class _Registry(Protocol):
+    HKEY_CURRENT_USER: int
+    KEY_READ: int
+    KEY_SET_VALUE: int
+    REG_SZ: int
+
+    def OpenKey(
+        self, root: int, path: str, reserved: int, access: int,
+    ) -> ContextManager[object]: ...
+    def CreateKeyEx(
+        self, root: int, path: str, reserved: int, access: int,
+    ) -> ContextManager[object]: ...
+    def QueryValueEx(self, key: object, name: str) -> tuple[object, int]: ...
+    def DeleteValue(self, key: object, name: str) -> None: ...
+    def SetValueEx(
+        self, key: object, name: str, reserved: int, kind: int, value: str,
+    ) -> None: ...
 
 
 def _platform() -> str:
@@ -139,7 +159,7 @@ def _loaded_owned(name: str, fields: dict[str, str]) -> bool:
 
 
 def _registry_read(name: str) -> str | None:
-    import winreg
+    winreg = cast(_Registry, importlib.import_module("winreg"))
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_READ) as key:
@@ -152,7 +172,7 @@ def _registry_read(name: str) -> str | None:
 
 
 def _registry_write(name: str, value: str | None) -> None:
-    import winreg
+    winreg = cast(_Registry, importlib.import_module("winreg"))
 
     with winreg.CreateKeyEx(
         winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE,

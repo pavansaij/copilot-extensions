@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from agent_procutil import no_window_kwargs, spawn_daemon
 from agent_procutil.daemon_broker import WindowsDaemonProcess
@@ -20,6 +20,10 @@ from .automatic_updates_policy import PolicyError, state_dir
 
 STATUS_NAME = "worker.json"
 RESTART_EXIT = 75
+
+
+class ChildOptions(TypedDict, total=False):
+    creationflags: int
 
 
 def selected_slot(root: Path) -> Path:
@@ -148,7 +152,7 @@ def worker_status(root: Path) -> dict[str, Any]:
 
 def spawn_worker(
     root: Path, *, standby: str | None = None,
-) -> subprocess.Popen | WindowsDaemonProcess:
+) -> subprocess.Popen[bytes] | WindowsDaemonProcess:
     args = ["automatic-updates", "run", "--root", str(root)]
     if standby is not None:
         args += ["--standby", standby]
@@ -208,5 +212,5 @@ def ensure_worker(root: Path, *, timeout: float = 15.0) -> dict[str, Any]:
     }
 
 
-def child_kwargs() -> dict[str, int]:
-    return no_window_kwargs()
+def child_kwargs() -> ChildOptions:
+    return cast(ChildOptions, no_window_kwargs())
