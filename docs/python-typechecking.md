@@ -57,6 +57,13 @@ physical inventory; other undeclared application trees still refuse. This is
 ownership accounting, not strict admission or an exclusion from `--new-code`:
 changed physical application files retain the whole-file strict ratchet.
 
+The Python-owned `installer_engine.py` constructor and each physical consumer
+have separate pending Python 3.11 analysis scopes, matching the installer
+bootstrap's existing minimum. Their surrounding runtime and dependency-policy
+code retains its Python 3.10 target. Manager uses its declared Python 3.11
+package minimum. These target corrections do not admit a pending scope or
+remove any file from the whole-file strict ratchet.
+
 ## Local commands
 
 From the source repository root, with Python and UV available:

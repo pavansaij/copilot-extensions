@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -17,18 +18,36 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Mapping, Sequence, TextIO
+from typing import (
+    TYPE_CHECKING, Callable, Iterator, Mapping, Protocol, Sequence, TextIO, TypedDict,
+    cast, overload,
+)
 
 from single_instance_lease.operation import OperationLock, OperationLockedError
 from . import _invocation, authority, boot, foundation_state
 from ._directory import create_queue_directory
+from ._invocation import RequestSpec as RequestSpec, TrustedRunner as TrustedRunner
 from ._invocation import spec_document as _spec_document
 from .pending_updates import capture_home as _capture_home
 from .pending_updates import supersede_waiting as _supersede_waiting
 
+if TYPE_CHECKING:
+    from agent_procutil.daemon_broker import WindowsDaemonProcess
+    from .participant import Witness
+
 SCHEMA = 4
 STATES = frozenset({"pending", "running", "completed", "interrupted", "blocked"})
-_active_transaction = ContextVar("update_driver_active_transaction", default=None)
+_active_transaction: ContextVar[Transaction | None] = ContextVar(
+    "update_driver_active_transaction", default=None,
+)
+
+
+class WorkerProcess(Protocol):
+    def poll(self) -> int | None: ...
+
+
+class _WorkerLaunchOptions(TypedDict, total=False):
+    python_bootstrap_root: Path
 
 
 class DriverError(RuntimeError):
@@ -53,32 +72,6 @@ class SpawnError(DriverError):
 
 class InterruptedError(DriverError):
     """Uncertain work fences further installation."""
-
-
-@dataclass(frozen=True)
-class RequestSpec:
-    """Credential-free normalized request identity, supplied by a product adapter."""
-
-    backend: str
-    argv: tuple[str, ...] = ()
-    project: str = ""
-    cwd: str = ""
-    source: str = ""
-    context: tuple[tuple[str, str], ...] = ()
-    repair: bool = False
-    killswitch_path: str = ""
-    authority: str = ""
-
-
-@dataclass(frozen=True)
-class TrustedRunner:
-    """Internal pinned invocation, never constructed from an arbitrary CLI command."""
-
-    argv: tuple[str, ...]
-    cwd: str
-    timeout: float = 7200
-    env: tuple[tuple[str, str], ...] = ()
-    context_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -301,7 +294,7 @@ def _assert_database_identity(path: Path, expected: os.stat_result) -> None:
 def _database(
     root: Path, *, create: bool = False, writable: bool = False,
     expected_identity: os.stat_result | None = None, allow_pristine: bool = False,
-):
+) -> Iterator[sqlite3.Connection]:
     db = None
     try:
         if create:
@@ -414,7 +407,7 @@ def _request(row: sqlite3.Row, root: Path) -> Request:
                 or row["state"] not in {"interrupted", "blocked"}
                 or row["finished_at"] is None or not row["error"]
                 or type(released) not in (int, float)
-                or not math.isfinite(released) or released < 0
+                or not math.isfinite(cast(float, released)) or cast(float, released) < 0
             ))
         ):
             raise StateError("malformed recovery-authorization evidence")
@@ -496,6 +489,14 @@ def enqueue(
             return request
 
 
+@overload
+def status(request_id: str, *, root: Path | None = None) -> Request: ...
+
+
+@overload
+def status(request_id: None = None, *, root: Path | None = None) -> tuple[Request, ...]: ...
+
+
 def status(
     request_id: str | None = None, *, root: Path | None = None,
 ) -> Request | tuple[Request, ...]:
@@ -515,7 +516,7 @@ def status(
 
 
 def _outcome(
-    root: Path, request_id: str, state: str, code=None, error=None, *,
+    root: Path, request_id: str, state: str, code: int | None = None, error: str | None = None, *,
     settled_boot_id: str | None = None,
 ) -> None:
     with _database(root, create=True) as db:
@@ -602,7 +603,7 @@ def ensure_worker(
     cwd: Path | None = None, env: Mapping[str, str] | None = None,
     startup_timeout: float = 15,
     python_bootstrap_root: Path | None = None,
-):
+) -> subprocess.Popen[bytes] | WindowsDaemonProcess:
     """Launch a trusted pinned product worker; its entry point must call drain."""
     from agent_procutil import spawn_daemon
 
@@ -619,13 +620,15 @@ def ensure_worker(
         raise InterruptedError("installation queue fenced; explicit positive settlement required")
     token = uuid.uuid4().hex
     receipt = root / f".worker-started-{token}"
+    options: _WorkerLaunchOptions = {}
+    if python_bootstrap_root is not None:
+        options["python_bootstrap_root"] = python_bootstrap_root
     try:
         process = spawn_daemon(
             argv, cwd=cwd or root, log_path=root / "worker.log",
             env_overrides={**(env or {}), "UPDATE_DRIVER_STARTUP": token},
             console_children=True, breakaway=True, contained_fallback=False,
-            **({"python_bootstrap_root": python_bootstrap_root}
-               if python_bootstrap_root is not None else {}),
+            **options,
         )
         deadline = time.monotonic() + startup_timeout
         while not receipt.is_file():
@@ -671,7 +674,7 @@ class Transaction:
     def __init__(self, request: Request, root: Path, lock: OperationLock):
         self.request, self.root, self.log_path = request, root, request.log_path
         self._lock = lock
-        self._witness = None
+        self._witness: Witness | None = None
         self._native_settled = False
 
     def _confirm_native_settlement(self) -> None:
@@ -742,8 +745,8 @@ def drain(
         if not boot.valid_boot_identity(admission_boot):
             raise StateError("native boot identity malformed")
     except Exception as error:
-        reason = "boot_identity_malformed" if isinstance(error, StateError) else admission_failure
-        detail = f"worker admission failed: {reason}:{type(error).__name__}"
+        admission_reason = "boot_identity_malformed" if isinstance(error, StateError) else admission_failure
+        detail = f"worker admission failed: {admission_reason}:{type(error).__name__}"
         with _database(root, writable=True) as db, db:
             db.execute(
                 "UPDATE requests SET error=? WHERE state='pending'"
@@ -920,7 +923,7 @@ def run_explicit(
 
 def wait(
     request_id: str, *, root: Path | None = None, timeout: float | None = None,
-    output: TextIO | None = None, poll_interval: float = .05, worker=None,
+    output: TextIO | None = None, poll_interval: float = .05, worker: WorkerProcess | None = None,
 ) -> Request:
     """Follow durable output and return the canonical recorded outcome."""
     if timeout is not None and (not math.isfinite(timeout) or timeout < 0):

@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 tomllib = importlib.import_module("tomllib")
 import versioned_runtime as runtime
@@ -47,8 +47,11 @@ from installer_source_build import (
 )
 
 from installer_engine_health import (
+    ContentRepairRequired as ContentRepairRequired,
     HealthRepairRequired as HealthRepairRequired,
+    ReadyCandidate as ReadyCandidate,
     _PREPARE_INSTALLED_CHECK,
+    refuse_admission as _refuse,
     verify_installed_inputs as verify_installed_inputs,
     verify_application_wheels as verify_application_wheels,
 )
@@ -57,6 +60,19 @@ _GENERATED_DIRECTORIES = {
     ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".test-runs",
     "build", "dist", "node_modules",
 }
+
+
+class _FingerprintOptions(TypedDict, total=False):
+    on_progress: Callable[[], None]
+
+
+class _ChildRetentionOptions(TypedDict, total=False):
+    runtime_root: Path
+    runtime_version: str
+    runtime_path: Path
+    deadline: float
+
+
 @dataclass(frozen=True)
 class FrozenInputs:
     plugin: Path
@@ -71,31 +87,16 @@ class FrozenInputs:
     application: Path | None = None
 
 
-@dataclass(frozen=True)
-class ReadyCandidate:
-    slot: Path
-    payload_hash: str
-    reused: bool
-    descriptor: int | None
-    frozen_plugin: Path
-    extras: tuple[str, ...] = ()
-    local_packages: tuple[str, ...] | None = None
-
-
-class ContentRepairRequired(RuntimeError):
-    """Published bytes differ; a caller must select a distinct generation."""
-
-
 def _construction_hash(
     files: tuple[Path, ...], extras: tuple[str, ...],
     local_packages: tuple[str, ...] | None = None,
     *, on_progress: Callable[[], None] | None = None,
     file_hashes: dict[Path, str] | None = None,
 ) -> str:
-    source_hash = runtime.fingerprint_source(
-        files, file_hashes=file_hashes,
-        **cast(dict[str, Any], {"on_progress": on_progress} if on_progress is not None else {}),
-    )
+    progress: _FingerprintOptions = {}
+    if on_progress is not None:
+        progress["on_progress"] = on_progress
+    source_hash = runtime.fingerprint_source(files, file_hashes=file_hashes, **progress)
     if not extras and local_packages is None:
         return source_hash
     profile: dict[str, object] = {"source_hash": source_hash, "extras": extras}
@@ -165,7 +166,8 @@ def _package_roots(plugin: Path) -> tuple[Path, ...]:
             child = root / path
             if child.is_file():
                 child = _contained(child, (root,))
-                if not cast(Callable[[str, str, Path], bool], _bundled_dbus_next)(key, dependency, child):
+                bundled_artifact = cast(Callable[[str, str, Path], bool], _bundled_dbus_next)
+                if not bundled_artifact(key, dependency, child):
                     raise DependencyPolicyError("local UV artifacts cannot prove release age")
                 # The admitted artifact is already covered by its owning package's files.
                 continue
@@ -266,7 +268,9 @@ def freeze_inputs(
     for root in roots:
         if destination == root or destination.is_relative_to(root):
             raise ValueError(f"Frozen input destination is inside runtime source: {destination}")
-    progress: dict[str, Any] = {"on_progress": on_progress} if on_progress is not None else {}
+    progress: _FingerprintOptions = {}
+    if on_progress is not None:
+        progress["on_progress"] = on_progress
     files = _source_files(roots, **progress)
     Path(_native_retained_path(destination)).mkdir(parents=True, exist_ok=False)
     try:
@@ -420,6 +424,13 @@ def _child(
         if inputs.wheel_inputs is not None:
             _check_deadline(inputs.wheel_inputs.deadline)
             remaining = min(timeout, inputs.wheel_inputs.deadline - time.monotonic())
+        retention: _ChildRetentionOptions = {}
+        if candidate is not None:
+            retention["runtime_root"] = candidate.parent.parent
+            retention["runtime_version"] = candidate.name
+            retention["runtime_path"] = Path(runtime.__file__)
+        if inputs.wheel_inputs is not None:
+            retention["deadline"] = inputs.wheel_inputs.deadline
         try:
             result = run_owned(
                 native_argv, cwd=cwd or Path(Path(argv[0]).resolve().anchor), env=env, timeout=remaining,
@@ -427,11 +438,7 @@ def _child(
                 on_output=relay if on_progress is not None or not output_fds else None,
                 output_fds=output_fds,
                 allow_breakaway=allow_breakaway,
-                **cast(dict[str, Any], {
-                    "runtime_root": candidate.parent.parent, "runtime_version": candidate.name,
-                    "runtime_path": Path(runtime.__file__),
-                } if candidate is not None else {}),
-                **cast(dict[str, Any], {"deadline": inputs.wheel_inputs.deadline} if inputs.wheel_inputs is not None else {}),
+                **retention,
             )
             if inputs.wheel_inputs is not None:
                 _check_deadline(inputs.wheel_inputs.deadline)
@@ -571,7 +578,7 @@ def _construct(
         if runtime.fingerprint_source(tuple(copied)) != before:
             raise RuntimeError("Application inputs changed while copying the slot project")
         _verify_application_wheels(inputs, slot)
-        environment = {
+        child_environment = {
             **os.environ, "PATH": str(uv.parent) + os.pathsep + os.environ.get("PATH", ""),
             "UV_PYTHON": str(base_python), "UV_PYTHON_DOWNLOADS": "never", "UV_OFFLINE": "1",
         }
@@ -584,7 +591,7 @@ def _construct(
         )
         _child(
             command, inputs=inputs, descriptor=descriptor, timeout=timeout, candidate=slot,
-            environment=environment,
+            environment=child_environment,
         )
         if (
             _source_files((inputs.application,)) != files
@@ -650,21 +657,6 @@ def _prepare_installed(
     )
 
 
-def _refuse(decision: str, version: str) -> None:
-    if decision == runtime.ADMIT_CONTENT_CONFLICT:
-        raise ContentRepairRequired(
-            f"Published runtime {version} has different content; publish a new version "
-            "or use an explicitly owned dev slot. Force cannot rewrite a numbered runtime."
-        )
-    if decision == runtime.ADMIT_HEALTH_REPAIR_REQUIRED:
-        raise HealthRepairRequired(
-            f"Runtime {version} requires distinct-generation health repair; "
-            "ordinary construction cannot replace its published or selected identity."
-        )
-    if decision not in (runtime.ADMIT_CONSTRUCT, runtime.ADMIT_REUSE):
-        raise RuntimeError(f"Unrecognized runtime admission for {version}: {decision}")
-
-
 def _assert_source_pin(plugin: Path, expected: dict[str, Any] | None) -> None:
     if expected is None:
         return
@@ -718,7 +710,9 @@ def numbered_candidate(
     )
 
 
-def dev_candidate(root: Path, *, owner: str, **kwargs: Any) -> AbstractContextManager[ReadyCandidate]:
+def dev_candidate(
+    root: Path, *, owner: str, **kwargs: Any,
+) -> AbstractContextManager[ReadyCandidate]:
     """Construct or reuse immutable source content under its explicit dev claim."""
     return _candidate(root, runtime.DEV_VERSION, dev_owner=owner, **kwargs)
 
@@ -890,11 +884,19 @@ def _candidate(
                         inputs, uv, python, refresh=False, timeout=child_timeout,
                     ))
                     if wheel_inputs is None:
-                        def run_source_build(argv: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
+                        def run_source_build(
+                            argv: list[str], *, timeout: float = child_timeout,
+                            delays: tuple[float, ...] = (), transient: str = "",
+                            environment: dict[str, str] | None = None,
+                            cwd: Path | None = None,
+                            on_progress: Callable[[], None] | None = None,
+                            allow_breakaway: bool = False,
+                        ) -> subprocess.CompletedProcess[str]:
                             return _child(
                                 argv, inputs=inputs, descriptor=descriptor,
-                                timeout=min(child_timeout, options.pop("timeout", child_timeout)),
-                                candidate=slot, **options,
+                                timeout=min(child_timeout, timeout), candidate=slot,
+                                delays=delays, transient=transient, environment=environment,
+                                cwd=cwd, on_progress=on_progress, allow_breakaway=allow_breakaway,
                             )
 
                         cache_root = root if source_wheel_cache_root is None else source_wheel_cache_root

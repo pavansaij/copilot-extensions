@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 import subprocess
 
+import versioned_runtime as runtime
 from installer_dependency_policy import DependencyPolicyError, _native_retained_path
+from installer_engine_process import ChildTimeoutExpired
 from installer_source_build import SourceWheelInputs
 from installer_wheel_inputs import WheelDeadlineError, WheelError, _ordinary
 from installer_wheel_snapshot import WheelInstallInputs, WheelReuseInputs, _digest, _open, _unchanged
@@ -50,6 +53,38 @@ getattr(module, sys.argv[3])(json.loads(sys.argv[4]))
 
 class HealthRepairRequired(RuntimeError):
     """Published health needs a distinct generation, never an in-place rebuild."""
+
+
+class ContentRepairRequired(RuntimeError):
+    """Published bytes differ; a caller must select a distinct generation."""
+
+
+@dataclass(frozen=True)
+class ReadyCandidate:
+    slot: Path
+    payload_hash: str
+    reused: bool
+    descriptor: int | None
+    frozen_plugin: Path
+    extras: tuple[str, ...] = ()
+    local_packages: tuple[str, ...] | None = None
+
+
+def refuse_admission(decision: str, version: str) -> None:
+    """Classify immutable-content and health admission without replacing a slot."""
+    if decision == runtime.ADMIT_CONTENT_CONFLICT:
+        raise ContentRepairRequired(
+            f"Published runtime {version} has different content; publish a new version "
+            "or use an explicitly owned dev slot. Force cannot rewrite a numbered runtime."
+        )
+    if decision == runtime.ADMIT_HEALTH_REPAIR_REQUIRED:
+        raise HealthRepairRequired(
+            f"Runtime {version} requires distinct-generation health repair; "
+            "ordinary construction cannot replace its published or selected identity."
+        )
+    if decision not in (runtime.ADMIT_CONSTRUCT, runtime.ADMIT_REUSE):
+        raise RuntimeError(f"Unrecognized runtime admission for {version}: {decision}")
+
 
 def verify_installed_inputs(
     slot: Path, python: Path | None, module: str, *,
@@ -284,7 +319,7 @@ if sys.argv[4]:
         )
         if nested and wheel_inputs is not None:
             verify_application_wheels(wheel_inputs, slot)
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, ChildTimeoutExpired) as error:
         if isinstance(wheel_inputs, WheelReuseInputs) and getattr(error, "returncode", None) == 74:
             raise DependencyPolicyError("Published runtime input evidence differs from installed inputs") from error
         if require_frozen_origin:
