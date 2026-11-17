@@ -10,7 +10,6 @@ import subprocess
 
 import versioned_runtime as runtime
 from installer_dependency_policy import DependencyPolicyError, _native_retained_path
-from installer_engine_process import ChildTimeoutExpired
 from installer_source_build import SourceWheelInputs
 from installer_wheel_inputs import WheelDeadlineError, WheelError, _ordinary
 from installer_wheel_snapshot import WheelInstallInputs, WheelReuseInputs, _digest, _open, _unchanged
@@ -319,7 +318,7 @@ if sys.argv[4]:
         )
         if nested and wheel_inputs is not None:
             verify_application_wheels(wheel_inputs, slot)
-    except (subprocess.CalledProcessError, ChildTimeoutExpired) as error:
+    except subprocess.CalledProcessError as error:
         if isinstance(wheel_inputs, WheelReuseInputs) and getattr(error, "returncode", None) == 74:
             raise DependencyPolicyError("Published runtime input evidence differs from installed inputs") from error
         if require_frozen_origin:

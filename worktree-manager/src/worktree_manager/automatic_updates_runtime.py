@@ -11,13 +11,12 @@ import secrets
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from agent_procutil import DaemonSpawnError
 from agent_procutil.daemon_broker import WindowsDaemonProcess
-from agent_procutil.daemon_instances import daemon_entrypoint
+from agent_procutil.daemon_instances import admit_daemon_instance
 from agent_procutil._daemon_instance_identity import birth_identity
 from zdd.cutover_lock import CutoverLock, CutoverLockedError
 
@@ -27,7 +26,6 @@ from .automatic_updates_policy import PolicyError, atomic_json, load_policy, sta
 log = logging.getLogger(__name__)
 POLL_SECONDS = 5.0
 CYCLE_BUDGET_SECONDS = 3600.0
-_WorkerRun = Callable[["Worker"], Coroutine[Any, Any, int]]
 
 
 class Worker:
@@ -252,11 +250,14 @@ class Worker:
             "successor failed activation; old worker retained", state="replacement-recovered",
         )
 
-    @cast(Callable[[_WorkerRun], _WorkerRun], daemon_entrypoint(
-        "worktree-manager-automatic-updates", source=__file__,
-        runtime_root=lambda self: self.root, purpose="production",
-    ))
     async def run(self) -> int:
+        with admit_daemon_instance(
+            "worktree-manager-automatic-updates", source=__file__,
+            runtime_root=self.root, purpose="production",
+        ):
+            return await self._run()
+
+    async def _run(self) -> int:
         if load_policy(self.root).owner != "manager":
             raise PolicyError("Manager automatic maintenance is not enabled")
         server = await asyncio.start_server(self.health, "127.0.0.1", 0, limit=16384)
