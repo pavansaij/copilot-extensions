@@ -688,14 +688,14 @@ def test_real_shim_selector_source_and_frozen_frontdoors(
 
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("configured", [False, True])
-def test_shim_selector_annotation_preserves_real_fallback(
+def test_shim_selector_preserves_private_cache_fallback(
     tmp_path: Path, configured: bool,
 ) -> None:
     template = (typecheck.ROOT / "libs/payload-invocation/templates/powershell-shim.tmpl").read_text(
         encoding="utf-8",
     )
     body = template.split("    $selector = @'\n", 1)[1].split("\n'@", 1)[0]
-    original = body.replace("prefix: str | None\n", "", 1)
+    original = body.replace("assert POLICY_VERSION == 2", "assert POLICY_VERSION == 0", 1)
     assert original != body
     expected = str(tmp_path / "existing-cache") if configured else None
     provider = typecheck.ROOT / "libs/agent-procutil/src"
@@ -706,13 +706,13 @@ def test_shim_selector_annotation_preserves_real_fallback(
             f"sys.path.insert(0,{str(provider)!r});"
             "from agent_procutil import python_cache;"
             f"assert Path(python_cache.__file__).resolve()==Path({str(provider / 'agent_procutil/python_cache.py')!r}).resolve();"
-            f"sys.pycache_prefix={expected!r};sys.argv=['-c'];"
+            f"sys.pycache_prefix={expected!r};sys.argv=['-c',{str(tmp_path / 'runtime')!r}];"
             f"exec(compile({program!r},'<actual-shim-selector>','exec'))"
         )
         result = typecheck._run([sys.executable, "-I", "-B", "-c", code], tmp_path)
         assert result.returncode == 0 and not result.stderr, result.stdout + result.stderr
         outputs.append(result.stdout)
-    assert outputs == [json.dumps(expected, ensure_ascii=True) + "\n"] * 2
+    assert outputs == [json.dumps(["-B"], ensure_ascii=True) + "\n"] * 2
 
 
 def _real_catalog_frontdoors(
@@ -886,7 +886,7 @@ def _real_catalog_frontdoors(
     label_prefix = "[pending] lib-payload-invocation (Python "
     assert result.stdout.count(label_prefix) == 1, result.stdout + result.stderr
     for version in (python_version,):
-        label = f"{label_prefix}{version}, {platform}, 4 physical files, 11 targets)"
+        label = f"{label_prefix}{version}, {platform}, 5 physical files, 12 targets)"
         assert label in result.stdout, result.stdout + result.stderr
         segment = result.stdout.split(label, 1)[1].split(label_prefix, 1)[0]
         errors = [line for line in segment.splitlines() if ": error:" in line]

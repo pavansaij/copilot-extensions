@@ -7,8 +7,10 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from update_driver import RequestSpec
 
 from worktree_manager import installation_updates as ui
 from worktree_manager import __main__ as manager
@@ -18,14 +20,14 @@ READ_OPERATIONS = ui._operations
 RESOLVE_ENGINE_INVOCATION = agent_plugin_runtime.resolve_installed_plugin_invocation
 
 
-def test_configuration_child_preserves_sealed_runtime():
+def test_configuration_child_preserves_sealed_runtime() -> None:
     assert ui.configuration_pivot().list_cmd[:4] == (
         sys.executable, "-B", "-m", "worktree_manager.installation_updates",
     )
 
 
 @pytest.fixture
-def inventory(tmp_path, monkeypatch):
+def inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("BOOTSTRAP_KILLSWITCH_STATE_FILE", raising=False)
@@ -52,7 +54,7 @@ def inventory(tmp_path, monkeypatch):
     return owner_row
 
 
-def test_complete_inventory_separates_known_payload_runtime_and_running(inventory):
+def test_complete_inventory_separates_known_payload_runtime_and_running(inventory: dict[str, Any]) -> None:
     rows = {row["id"]: row for row in ui.inventory()["entries"]}
     assert set(rows) == {
         "worktree-manager", "guide", "absent", "manager-automatic-maintenance",
@@ -65,7 +67,9 @@ def test_complete_inventory_separates_known_payload_runtime_and_running(inventor
     assert "setup/enablement" in rows["absent"]["card"]["body"]
 
 
-def test_old_owner_is_actionable_not_a_suite_fallback(inventory, monkeypatch):
+def test_old_owner_is_actionable_not_a_suite_fallback(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(ui.engine_client, "run_json", lambda *a, **k: {})
     rows = {row["id"]: row for row in ui.inventory()["entries"]}
     assert not rows["guide"]["updatable"]
@@ -78,14 +82,18 @@ def test_old_owner_is_actionable_not_a_suite_fallback(inventory, monkeypatch):
     {"contract": True, "entries": []}, {"contract": 1, "entries": ["invalid"]},
     {"contract": 1, "entries": [{"id": "worktree-manager"}]},
 ])
-def test_malformed_owner_keeps_manager_and_unknown_components_inspectable(inventory, monkeypatch, payload):
+def test_malformed_owner_keeps_manager_and_unknown_components_inspectable(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any],
+) -> None:
     monkeypatch.setattr(ui.engine_client, "run_json", lambda *a, **k: payload)
     rows = {row["id"]: row for row in ui.inventory()["entries"]}
     assert rows["worktree-manager"]["updatable"]
     assert rows["guide"]["installed"] == "unknown" and not rows["guide"]["updatable"]
 
 
-def test_history_failure_is_unknown_not_idle_or_success(inventory, monkeypatch):
+def test_history_failure_is_unknown_not_idle_or_success(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(ui, "_operations", lambda **kwargs: (_ for _ in ()).throw(ValueError("unreadable journal")))
     rows = ui.inventory()["entries"]
     assert all(
@@ -99,9 +107,9 @@ def test_history_failure_is_unknown_not_idle_or_success(inventory, monkeypatch):
 @pytest.mark.parametrize("origin", ["packaged", "checkout"])
 @pytest.mark.parametrize("error", [OSError("read denied"), ValueError("malformed catalog")])
 def test_independent_catalog_read_failure_keeps_manager_and_owner_rows(
-    inventory, monkeypatch, origin, error,
-):
-    def fail(*args, **kwargs):
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, origin: str, error: Exception,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
         raise error
 
     monkeypatch.setattr(catalog if origin == "packaged" else discovery,
@@ -112,9 +120,14 @@ def test_independent_catalog_read_failure_keeps_manager_and_owner_rows(
     assert "catalog unavailable" in result["summary"]["banner_text"].lower()
 
 
-def test_submit_revalidates_and_forwards_only_selected_target(inventory, monkeypatch):
-    calls = []
-    monkeypatch.setattr(update_driver_cli, "cmd_update_request", lambda args: calls.append(args) or 0)
+def test_submit_revalidates_and_forwards_only_selected_target(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    def submit(args: list[str]) -> int:
+        calls.append(args)
+        return 0
+    monkeypatch.setattr(update_driver_cli, "cmd_update_request", submit)
     assert ui.submit("guide") == 0
     assert calls == [["--target", "guide", "--detach", "--json"]]
     inventory["updatable"] = False
@@ -123,7 +136,7 @@ def test_submit_revalidates_and_forwards_only_selected_target(inventory, monkeyp
     assert len(calls) == 1
 
 
-def test_diagnostic_refuses_unrelated_component_target(monkeypatch):
+def test_diagnostic_refuses_unrelated_component_target(monkeypatch: pytest.MonkeyPatch) -> None:
     from worktree_manager import doctor_cli
 
     monkeypatch.setattr(ui.engine_client, "accept_inherited_engine_command", lambda: "")
@@ -136,7 +149,9 @@ def test_diagnostic_refuses_unrelated_component_target(monkeypatch):
 
 
 @pytest.fixture
-def engine_cells(inventory, monkeypatch, tmp_path):
+def engine_cells(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> SimpleNamespace:
     contexts = {
         name: {
             "COPILOT_EXTENSIONS_CONTEXT": str(tmp_path / name / "install.json"),
@@ -148,10 +163,10 @@ def engine_cells(inventory, monkeypatch, tmp_path):
     for context in contexts.values():
         Path(context["AGENT_WORKTREES_UPDATE_CONTEXT"]).mkdir(parents=True)
     roots = {name: tmp_path / name / "runtime" for name in contexts}
-    selected = []
-    resolutions = []
+    selected: list[str] = []
+    resolutions: list[dict[str, str]] = []
 
-    def resolve(plugin, *, environment):
+    def resolve(plugin: str, *, environment: dict[str, str]) -> tuple[list[str], Path] | None:
         assert plugin == "agent-worktrees"
         resolutions.append(dict(environment))
         for name, context in contexts.items():
@@ -159,7 +174,7 @@ def engine_cells(inventory, monkeypatch, tmp_path):
                 return (["/fixture/engine"], roots[name])
         return None
 
-    def select(name):
+    def select(name: str) -> None:
         selected[:] = [name]
         for key, value in contexts[name].items():
             monkeypatch.setenv(key, value)
@@ -174,17 +189,19 @@ def engine_cells(inventory, monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def manager_request(engine_cells, monkeypatch, tmp_path):
+def manager_request(
+    engine_cells: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> tuple[SimpleNamespace, list[RequestSpec]]:
     import update_driver
 
-    calls = []
+    calls: list[RequestSpec] = []
     monkeypatch.setattr(update_driver, "borrowed_custody", lambda: None)
     request = SimpleNamespace(
         id="targeted-request", state="pending", exit_code=None, error=None,
         log_path=tmp_path / "targeted.log",
     )
 
-    def enqueue(spec, **kwargs):
+    def enqueue(spec: RequestSpec, **kwargs: Any) -> SimpleNamespace:
         calls.append(spec)
         request.spec = spec
         return request
@@ -201,13 +218,17 @@ def manager_request(engine_cells, monkeypatch, tmp_path):
     return request, calls
 
 
-def test_manager_plugin_submission_uses_the_manager_durable_admission_boundary(
-    manager_request, engine_cells,
-):
+def _submit_automatic(target: str) -> int:
+    return update_driver_cli.cmd_update_request(["--target", target, "--auto", "--detach", "--json"])
+
+
+def test_automatic_plugin_submission_uses_the_manager_durable_admission_boundary(
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], engine_cells: SimpleNamespace,
+) -> None:
     request, calls = manager_request
-    assert ui.submit("guide") == 0
+    assert _submit_automatic("guide") == 0
     assert len(calls) == 1 and calls[0].backend == "manager"
-    assert calls[0].argv == ("--target", "guide")
+    assert calls[0].argv == ("--target", "guide", "--auto")
     assert calls[0].source == "manager-source"
     assert all(dict(calls[0].context)[key] == value for key, value in engine_cells.contexts["cell-a"].items())
     for state, exit_code, activity, error in (
@@ -246,19 +267,20 @@ def test_manager_plugin_submission_uses_the_manager_durable_admission_boundary(
         assert "Durable operation:" not in row["card"]["body"]
 
 
-def test_same_manager_plugin_submissions_refresh_only_their_addressed_engine_cell(
-    manager_request, engine_cells, monkeypatch,
-):
+def test_same_automatic_plugin_submissions_refresh_only_their_addressed_engine_cell(
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], engine_cells: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import update_driver
 
     request, calls = manager_request
     request.id = "cell-a-request"
-    assert ui.submit("guide") == 0
+    assert _submit_automatic("guide") == 0
     first = SimpleNamespace(**vars(request))
     first.state, first.exit_code, first.error = "completed", 1, "cell-a build failed"
     engine_cells.select("cell-b")
     request.id = "cell-b-request"
-    assert ui.submit("guide") == 0
+    assert _submit_automatic("guide") == 0
     request.state = "running"
     assert calls[0].source == calls[1].source == "manager-source"
     assert dict(calls[0].context) != dict(calls[1].context)
@@ -282,10 +304,11 @@ def test_same_manager_plugin_submissions_refresh_only_their_addressed_engine_cel
     (("COPILOT_EXTENSIONS_CONTEXT", "/foreign/install.json"),),
 ])
 def test_unattributable_plugin_context_is_unknown_without_progress_or_ambient_fallback(
-    manager_request, engine_cells, context,
-):
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], engine_cells: SimpleNamespace,
+    context: tuple[tuple[str, str], ...],
+) -> None:
     request, calls = manager_request
-    assert ui.submit("guide") == 0
+    assert _submit_automatic("guide") == 0
     request.spec = replace(calls[0], context=context)
     request.state, request.exit_code = "completed", 0
     request.log_path.write_text("unattributed completion details", encoding="utf-8")
@@ -302,8 +325,9 @@ def test_unattributable_plugin_context_is_unknown_without_progress_or_ambient_fa
 
 
 def test_manager_only_history_does_not_depend_on_engine_cell_or_saved_context(
-    manager_request, engine_cells, monkeypatch,
-):
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], engine_cells: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import update_driver
 
     request, calls = manager_request
@@ -324,8 +348,9 @@ def test_manager_only_history_does_not_depend_on_engine_cell_or_saved_context(
 
 
 def test_default_root_submission_history_uses_real_resolver_without_inheriting_cell_selection(
-    manager_request, monkeypatch, tmp_path,
-):
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     from _installation_context_fixtures import namespaced_fixture, patch_profile, write_json, write_slot
 
     request, calls = manager_request
@@ -358,7 +383,7 @@ def test_default_root_submission_history_uses_real_resolver_without_inheriting_c
             "running": "not applicable", "source": "fixture", "updatable": True, "limitation": "",
         }],
     })
-    assert ui.submit("guide") == 0
+    assert _submit_automatic("guide") == 0
     assert dict(calls[0].context) == {
         "WORKTREE_MANAGER_ROOT": str((home / ".worktree-manager").resolve()),
     }
@@ -396,9 +421,9 @@ def test_default_root_submission_history_uses_real_resolver_without_inheriting_c
 
 
 def test_missing_engine_identity_reports_plugin_unknown_without_affecting_manager(
-    manager_request, monkeypatch,
-):
-    assert ui.submit("guide") == 0
+    manager_request: tuple[SimpleNamespace, list[RequestSpec]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _submit_automatic("guide") == 0
     monkeypatch.setattr(ui.engine_client, "run_json", lambda *a, **k: {"contract": 1, "entries": []})
     rows = {row["id"]: row for row in ui.inventory()["entries"]}
     assert rows["guide"]["activity"] == "unknown"
@@ -407,8 +432,9 @@ def test_missing_engine_identity_reports_plugin_unknown_without_affecting_manage
 
 
 def test_public_manager_plugin_target_refuses_unsupported_source_before_submission(
-    inventory, tmp_path, monkeypatch, capsys,
-):
+    inventory: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     import update_driver
     from worktree_manager.runtime_source_config import RuntimeSource, configured_source, set_source
 
@@ -427,13 +453,15 @@ def test_public_manager_plugin_target_refuses_unsupported_source_before_submissi
     assert (root / "config.toml").read_bytes() == baseline
 
 
-def test_explicit_headless_engine_submission_uses_canonical_no_window_flags(monkeypatch):
+def test_explicit_headless_engine_submission_uses_canonical_no_window_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import agent_procutil
 
-    seen = {}
+    seen: dict[str, Any] = {}
     monkeypatch.setattr(ui.engine_client, "engine_base_command", lambda: ["synthetic-engine"])
     monkeypatch.setattr(agent_procutil, "no_window_kwargs", lambda: {"creationflags": 0x08000000})
-    monkeypatch.setattr(ui.engine_client.subprocess, "run", lambda argv, **kwargs:
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs:
         seen.update(argv=argv, **kwargs) or SimpleNamespace(returncode=0))
     assert ui.engine_client.run_engine_passthrough(
         None, ["update", "--target", "guide", "--detach"], headless=True,
@@ -449,8 +477,9 @@ def test_explicit_headless_engine_submission_uses_canonical_no_window_flags(monk
     [], ["--no-anchor-sync", "--no-prune-pivots"],
 ])
 def test_target_bypasses_bootstrap_and_suite_orchestration(
-    inventory, monkeypatch, target, automatic, compatibility_flags,
-):
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, target: str,
+    automatic: bool, compatibility_flags: list[str],
+) -> None:
     from worktree_manager import update_bootstrap
 
     monkeypatch.setattr(update_bootstrap, "prepare_update", lambda *a: pytest.fail("target entered suite bootstrap"))
@@ -458,9 +487,11 @@ def test_target_bypasses_bootstrap_and_suite_orchestration(
     monkeypatch.setattr(self_install, "self_update", lambda **k: SimpleNamespace(
         action="already-current", cutover=None, reason="", version="1",
     ) if target == "worktree-manager" else pytest.fail("plugin updated Manager"))
-    calls = []
-    monkeypatch.setattr(ui.engine_client, "run_engine_passthrough", lambda project, args:
-        calls.append((project, args)) or 0)
+    calls: list[tuple[str | None, list[str]]] = []
+    def passthrough(project: str | None, args: list[str]) -> int:
+        calls.append((project, args))
+        return 0
+    monkeypatch.setattr(ui.engine_client, "run_engine_passthrough", passthrough)
     mode = ["--auto"] if automatic else []
     assert manager._cmd_update(["--target=" + target, *mode, *compatibility_flags]) == 0
     assert calls == ([] if target == "worktree-manager" else [
@@ -468,7 +499,9 @@ def test_target_bypasses_bootstrap_and_suite_orchestration(
     ])
 
 
-def test_targeted_manager_accepts_inert_controller_override(inventory, monkeypatch):
+def test_targeted_manager_accepts_inert_controller_override(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(self_install, "self_update", lambda **_kwargs: SimpleNamespace(
         action="already-current", cutover=None, reason="", version="1",
     ))
@@ -481,7 +514,10 @@ def test_targeted_manager_accepts_inert_controller_override(inventory, monkeypat
     {"action": "error", "reason": "synthetic cutover lease busy"},
     {"action": "cutover", "result": {"ok": False, "reason": "synthetic cutover lease busy"}},
 ])
-def test_manager_cutover_failure_keeps_actionable_owner_detail(inventory, monkeypatch, capsys, cutover):
+def test_manager_cutover_failure_keeps_actionable_owner_detail(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], cutover: dict[str, Any],
+) -> None:
     monkeypatch.setattr(self_install, "self_update", lambda **kwargs: SimpleNamespace(
         action="updated", cutover=cutover, reason="", version="2",
     ))
@@ -495,7 +531,7 @@ def test_manager_cutover_failure_keeps_actionable_owner_detail(inventory, monkey
     ["--force"], ["--force-runtime", "guide"], ["--skip-modules"], ["--repair-engine", "source"],
     ["--engine-acquisition-timeout", "120"],
 ])
-def test_target_rejects_widening_or_repair_flags(flags):
+def test_target_rejects_widening_or_repair_flags(flags: list[str]) -> None:
     with pytest.raises(SystemExit):
         update_driver_cli.parse_options(["--target", "guide", *flags])
 
@@ -503,12 +539,14 @@ def test_target_rejects_widening_or_repair_flags(flags):
 @pytest.mark.parametrize("arguments", [
     ["--target", ""], ["--target="], ["--target", " "],
 ])
-def test_manager_rejects_empty_target_before_submission(arguments):
+def test_manager_rejects_empty_target_before_submission(arguments: list[str]) -> None:
     with pytest.raises(SystemExit):
         update_driver_cli.parse_options(arguments)
 
 
-def test_durable_history_distinguishes_acceptance_running_failure_and_completion(inventory, tmp_path, monkeypatch):
+def test_durable_history_distinguishes_acceptance_running_failure_and_completion(
+    inventory: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import update_driver
 
     monkeypatch.setattr(ui, "_operations", READ_OPERATIONS)
@@ -518,7 +556,7 @@ def test_durable_history_distinguishes_acceptance_running_failure_and_completion
     log.write_text("Building selected guide payload")
     request = SimpleNamespace(spec=spec, id="fixture-operation", state="pending", exit_code=None, error=None, log_path=log)
     monkeypatch.setattr(update_driver, "status", lambda: (request,))
-    def read():
+    def read() -> dict[str, dict[str, Any]]:
         return ui._operations(engine_source="selected-source")
 
     assert read()["guide"]["state"] == "queued"
@@ -541,7 +579,9 @@ def test_durable_history_distinguishes_acceptance_running_failure_and_completion
 
 
 @pytest.mark.parametrize("shape", ["reference", "inventory"])
-def test_known_roster_uses_both_canonical_marketplace_result_shapes(inventory, monkeypatch, shape):
+def test_known_roster_uses_both_canonical_marketplace_result_shapes(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, shape: str,
+) -> None:
     import plugin_resolve
     from plugin_resolve import inventory as plugin_inventory
 
@@ -552,7 +592,9 @@ def test_known_roster_uses_both_canonical_marketplace_result_shapes(inventory, m
     assert "catalog-only" in rows and not rows["catalog-only"]["updatable"]
 
 
-def test_engine_history_is_attributed_only_to_selected_execution_source(inventory, tmp_path, monkeypatch):
+def test_engine_history_is_attributed_only_to_selected_execution_source(
+    inventory: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import update_driver
 
     monkeypatch.setattr(ui, "_operations", READ_OPERATIONS)
@@ -572,11 +614,14 @@ def test_engine_history_is_attributed_only_to_selected_execution_source(inventor
     assert next(row for row in ui.inventory()["entries"] if row["id"] == "guide")["activity"] == "idle"
 
 
-def test_durable_submission_uses_existing_owner_not_an_observer_queue(inventory, monkeypatch, tmp_path, capsys):
+def test_durable_submission_uses_existing_owner_not_an_observer_queue(
+    inventory: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     import update_driver
 
     request = SimpleNamespace(id="fixture-request", state="pending", exit_code=None, error=None, log_path=tmp_path / "log")
-    seen = {}
+    seen: dict[str, Any] = {}
     monkeypatch.setattr(update_driver, "borrowed_custody", lambda: None)
     monkeypatch.setattr(update_driver_cli, "_source_key", lambda: "fixture-source")
     monkeypatch.setattr(update_driver, "runtime_command", lambda module, args=(): (("/fixture/python", "-m", module, *args), {}))
@@ -589,14 +634,16 @@ def test_durable_submission_uses_existing_owner_not_an_observer_queue(inventory,
     assert json.loads(capsys.readouterr().out)["state"] == "pending"
 
 
-def test_refreshed_inventory_uses_owner_version_not_receipt_success(inventory):
+def test_refreshed_inventory_uses_owner_version_not_receipt_success(inventory: dict[str, Any]) -> None:
     assert next(row for row in ui.inventory()["entries"] if row["id"] == "guide")["payload"] == "2"
     inventory["payload"] = "3"
     assert next(row for row in ui.inventory()["entries"] if row["id"] == "guide")["payload"] == "3"
 
 
 @pytest.mark.parametrize("suite_budget", [None, "120"])
-def test_real_detached_target_request_survives_submitter_exit_and_retains_failure(tmp_path, monkeypatch, suite_budget):
+def test_real_detached_target_request_survives_submitter_exit_and_retains_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite_budget: str | None,
+) -> None:
     import update_driver
     from agent_procutil import no_window_kwargs
 
@@ -607,7 +654,8 @@ def test_real_detached_target_request_survives_submitter_exit_and_retains_failur
     events = tmp_path / "events.jsonl"
     monkeypatch.setenv("UPDATE_DRIVER_TEST_EVENTS", str(events))
     if suite_budget is not None:
-        monkeypatch.setenv(update_driver_cli.TIMEOUT_ENV, suite_budget)
+        from worktree_manager.engine_acquisition_budget import TIMEOUT_ENV
+        monkeypatch.setenv(TIMEOUT_ENV, suite_budget)
     fixture = Path(__file__).parent / "fixtures" / "update_driver_cli.py"
     result = subprocess.run(
         [sys.executable, str(fixture), "submit", "--detach", "--json", "--target", "worktree-manager"],
@@ -624,7 +672,9 @@ def test_real_detached_target_request_survives_submitter_exit_and_retains_failur
     assert records[0]["pid"] != os.getpid()
 
 
-def test_real_inventory_cli_uses_selected_provider_and_no_installation(tmp_path, monkeypatch):
+def test_real_inventory_cli_uses_selected_provider_and_no_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from agent_procutil.owned_process import run_owned
 
     home = tmp_path / "home"

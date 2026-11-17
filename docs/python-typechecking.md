@@ -36,6 +36,11 @@ controls live in `tools/promotion_unit_tests/test_typecheck_new_code.py`; actual
 MyPy duplicate-module, strict-failure, import-precedence and source-replacement
 controls live in `tools/test_typecheck_programs.py`.
 
+Import resolution prefers the checked project's inventoried `src` roots over
+other projects' bundled package copies, including during test-only checks.
+This keeps a standalone source edit from being checked against an older
+consumer copy without suppressing diagnostics or admitting additional files.
+
 Bridge remains pending as a project. Its whole-file changed-code checks use
 a hash-locked extension of the service-index checker environment, adding
 Cryptography for its HTTPS certificate fixtures alongside Pydantic's typed

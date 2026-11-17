@@ -16,9 +16,14 @@ import shutil
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    import tarfile
 
 
-def _safe_extract(tf, dest: Path) -> None:
+def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
     """Extract a tar into ``dest``, refusing anything that would escape it.
 
     A hand-rolled path-only pre-check computed against ``getmembers()``
@@ -249,7 +254,7 @@ def _copy_payload_unsafe(
     )
 
     if os.name == "nt":
-        native = _runtime_installer().engine._native_retained_path
+        native = cast(Callable[[], ModuleType], _runtime_installer)().engine._native_retained_path
         payload_dir, slot = Path(native(payload_dir)), Path(native(slot))
 
     if payload_dir.is_symlink():
@@ -302,7 +307,7 @@ def _copy_payload_unsafe(
         # symlinks=False would dereference it at this second hop, still
         # smuggling external content into the published slot one step later
         # and defeating _find_any_symlink's downstream rejection.
-        def copy(origin, destination):
+        def copy(origin: str, destination: str) -> str:
             result = shutil.copy2(origin, destination)
             produced(Path(destination))
             if on_progress is not None:
@@ -385,7 +390,10 @@ def _clear_dir(d: Path) -> None:
                 pass
 
 
-def _fetch_via_tarball(staging: Path, url: str, *, timeout: int = 180, _extract=None) -> None:
+def _fetch_via_tarball(
+    staging: Path, url: str, *, timeout: int = 180,
+    _extract: Callable[[tarfile.TarFile, Path], None] | None = None,
+) -> None:
     """Fetch + extract the worktree-manager payload from a GitHub tarball (no git).
 
     Replaces ``staging`` contents with the extracted ``worktree-manager/`` payload
