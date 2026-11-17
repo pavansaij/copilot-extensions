@@ -6,6 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,10 @@ from worktree_manager import automatic_updates_legacy as legacy
 from worktree_manager.automatic_updates_policy import PolicyError
 
 
-def _inventory() -> dict:
+NativeInventory = tuple[list[str], dict[str, Any]]
+
+
+def _inventory() -> dict[str, Any]:
     return {
         "schema": "copilot-extensions.legacy-update-inventory", "version": 1,
         "ok": True, "adoption_ready": True,
@@ -30,7 +34,7 @@ def _inventory() -> dict:
 
 
 @pytest.fixture
-def installed(monkeypatch, tmp_path: Path):
+def installed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(
         agent_plugin_runtime, "resolve_installed_plugin_command",
         lambda plugin: ["installed-python", "-m", "agent_machines"],
@@ -42,15 +46,18 @@ def installed(monkeypatch, tmp_path: Path):
     return tmp_path
 
 
-def test_public_inventory_uses_exact_installed_command(installed, monkeypatch) -> None:
-    calls = []
+def test_public_inventory_uses_exact_installed_command(
+    installed: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def run(argv, **kwargs):
+    def run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
         calls.append((argv, kwargs))
         return SimpleNamespace(returncode=0, stdout=json.dumps(_inventory()), stderr="")
 
-    monkeypatch.setattr(legacy.subprocess, "run", run)
-    assert legacy.installed_inventory()["adoption_ready"]
+    monkeypatch.setattr(subprocess, "run", run)
+    inventory = legacy.installed_inventory()
+    assert inventory is not None and inventory["adoption_ready"]
     assert calls[0][0] == [
         "installed-python", "-m", "agent_machines", "fleet-update", "inventory", "--json",
     ]
@@ -61,9 +68,11 @@ def test_public_inventory_uses_exact_installed_command(installed, monkeypatch) -
     {"version": True}, {"version": 2}, {"ok": False}, {"adoption_ready": False},
     {"legacy_artifacts": []}, {"legacy_artifacts": [{"kind": []}, {"kind": "self"}]},
 ])
-def test_incomplete_public_inventory_blocks_adoption(installed, monkeypatch, change) -> None:
+def test_incomplete_public_inventory_blocks_adoption(
+    installed: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any],
+) -> None:
     monkeypatch.setattr(
-        legacy.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps({**_inventory(), **change}), stderr="",
         ),
     )
@@ -77,12 +86,12 @@ def test_incomplete_public_inventory_blocks_adoption(installed, monkeypatch, cha
     ("self", "blocks_adoption", True),
 ])
 def test_ready_claim_cannot_override_artifact_evidence(
-    installed, monkeypatch, kind: str, key: str, value: object,
+    installed: Path, monkeypatch: pytest.MonkeyPatch, kind: str, key: str, value: object,
 ) -> None:
     payload = _inventory()
     next(item for item in payload["legacy_artifacts"] if item["kind"] == kind)[key] = value
     monkeypatch.setattr(
-        legacy.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload), stderr="",
         ),
     )
@@ -90,9 +99,11 @@ def test_ready_claim_cannot_override_artifact_evidence(
         legacy.require_legacy_retired()
 
 
-def test_older_installed_cli_is_unavailable_not_absent(installed, monkeypatch) -> None:
+def test_older_installed_cli_is_unavailable_not_absent(
+    installed: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
-        legacy.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
             returncode=2, stdout="", stderr="invalid choice: inventory",
         ),
     )
@@ -100,7 +111,9 @@ def test_older_installed_cli_is_unavailable_not_absent(installed, monkeypatch) -
         legacy.require_legacy_retired()
 
 
-def test_corrupt_install_receipt_is_not_optional_absence(tmp_path: Path, monkeypatch) -> None:
+def test_corrupt_install_receipt_is_not_optional_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = tmp_path / "agent-machines"
     root.mkdir()
     (root / "current-version").write_text("1.0.0", encoding="utf-8")
@@ -110,7 +123,9 @@ def test_corrupt_install_receipt_is_not_optional_absence(tmp_path: Path, monkeyp
         legacy.require_legacy_retired()
 
 
-def test_absent_optional_plugin_still_checks_native_triggers(tmp_path: Path, monkeypatch) -> None:
+def test_absent_optional_plugin_still_checks_native_triggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(agent_plugin_runtime, "resolve_installed_plugin_command", lambda plugin: None)
     monkeypatch.setattr(agent_plugin_runtime, "legacy_plugin_root", lambda plugin: tmp_path / plugin)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -120,7 +135,7 @@ def test_absent_optional_plugin_still_checks_native_triggers(tmp_path: Path, mon
         legacy.require_legacy_retired()
 
 
-def test_orphaned_manual_lock_is_not_ignored(tmp_path: Path, monkeypatch) -> None:
+def test_orphaned_manual_lock_is_not_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     lock = tmp_path / ".agent-machines" / "self-update" / "sweep.lock.json"
     lock.parent.mkdir(parents=True)
     lock.write_text("{}", encoding="utf-8")
@@ -133,7 +148,7 @@ def test_orphaned_manual_lock_is_not_ignored(tmp_path: Path, monkeypatch) -> Non
 
 
 @pytest.fixture
-def native_inventory(tmp_path: Path, monkeypatch):
+def native_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NativeInventory:
     monkeypatch.setattr(agent_plugin_runtime, "resolve_installed_plugin_command", lambda plugin: None)
     monkeypatch.setattr(agent_plugin_runtime, "legacy_plugin_root", lambda plugin: tmp_path / plugin)
     monkeypatch.setattr(legacy, "sys", SimpleNamespace(platform="linux"))
@@ -141,7 +156,7 @@ def native_inventory(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     calls = []
-    replies = {
+    replies: dict[str, Any] = {
         unit: SimpleNamespace(
             returncode=0, stdout="LoadState=not-found\nActiveState=inactive\nJob=0\n", stderr="",
         )
@@ -149,7 +164,7 @@ def native_inventory(tmp_path: Path, monkeypatch):
                      f"{legacy.SELF_NAME}.service")
     }
 
-    def run(argv, **kwargs):
+    def run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
         unit = argv[3]
         assert argv == [
             "systemctl", "--user", "show", unit, "--property=LoadState,ActiveState,Job", "--no-pager",
@@ -158,15 +173,16 @@ def native_inventory(tmp_path: Path, monkeypatch):
         reply = replies[unit]
         if isinstance(reply, BaseException):
             raise reply
+        assert isinstance(reply, SimpleNamespace)
         return reply
 
-    monkeypatch.setattr(legacy.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     return calls, replies
 
 
 @pytest.mark.parametrize("state", ["active", "activating", "deactivating", "reloading"])
 def test_cached_fleet_timer_blocks_even_with_inactive_services(
-    native_inventory, tmp_path: Path, state: str,
+    native_inventory: NativeInventory, tmp_path: Path, state: str,
 ) -> None:
     calls, replies = native_inventory
     timer = f"{legacy.LEGACY_NAME}.timer"
@@ -182,7 +198,9 @@ def test_cached_fleet_timer_blocks_even_with_inactive_services(
     "", "LoadState=loaded\n", "LoadState=loaded\nActiveState=unknown\nJob=0\n",
     "LoadState=unknown\nActiveState=inactive\nJob=0\n",
 ])
-def test_unverifiable_cached_timer_blocks_adoption(native_inventory, stdout: str) -> None:
+def test_unverifiable_cached_timer_blocks_adoption(
+    native_inventory: NativeInventory, stdout: str,
+) -> None:
     calls, replies = native_inventory
     timer = f"{legacy.LEGACY_NAME}.timer"
     replies[timer].stdout = stdout
@@ -194,7 +212,7 @@ def test_unverifiable_cached_timer_blocks_adoption(native_inventory, stdout: str
 @pytest.mark.parametrize("load_state", ["not-found", "loaded", "masked"])
 @pytest.mark.parametrize("active_state", ["inactive", "failed"])
 def test_known_inactive_cached_units_allow_adoption(
-    native_inventory, load_state: str, active_state: str,
+    native_inventory: NativeInventory, load_state: str, active_state: str,
 ) -> None:
     calls, replies = native_inventory
     for reply in replies.values():
@@ -204,7 +222,7 @@ def test_known_inactive_cached_units_allow_adoption(
 
 
 def test_nonzero_absent_unit_response_still_proves_no_legacy_work(
-    native_inventory, tmp_path: Path,
+    native_inventory: NativeInventory, tmp_path: Path,
 ) -> None:
     calls, replies = native_inventory
     for reply in replies.values():
@@ -224,7 +242,9 @@ def test_nonzero_absent_unit_response_still_proves_no_legacy_work(
     "LoadState=not-found\nActiveState=inactive\n",
     "LoadState=not-found\nActiveState=inactive\nJob=0\nJob=0\n",
 ])
-def test_nonzero_query_needs_complete_consistent_absence(native_inventory, stdout: str) -> None:
+def test_nonzero_query_needs_complete_consistent_absence(
+    native_inventory: NativeInventory, stdout: str,
+) -> None:
     calls, replies = native_inventory
     unit = f"{legacy.LEGACY_NAME}.timer"
     replies[unit].returncode = 1
@@ -236,7 +256,8 @@ def test_nonzero_query_needs_complete_consistent_absence(native_inventory, stdou
 
 @pytest.mark.parametrize("action", ["enable", "enroll"])
 def test_absent_units_allow_explicit_enrollment(
-    native_inventory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, action: str,
+    native_inventory: NativeInventory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], action: str,
 ) -> None:
     from worktree_manager import automatic_updates_autostart as startup
     from worktree_manager import automatic_updates_cli as cli, automatic_updates_process as process
@@ -250,13 +271,13 @@ def test_absent_units_allow_explicit_enrollment(
     monkeypatch.setattr(process, "selected_slot", lambda root: tmp_path / "slot")
     activations = []
 
-    def register(root: Path) -> dict:
+    def register(root: Path) -> dict[str, bool]:
         assert calls == list(replies)
         assert policy.load_policy(root).owner == "manager"
         activations.append("startup")
         return {"registered": True}
 
-    def ensure(root: Path) -> dict:
+    def ensure(root: Path) -> dict[str, bool]:
         activations.append("worker")
         return {"running": True}
 
@@ -276,7 +297,9 @@ def test_absent_units_allow_explicit_enrollment(
 @pytest.mark.parametrize("unit", [
     f"{legacy.LEGACY_NAME}.timer", f"{legacy.LEGACY_NAME}.service", f"{legacy.SELF_NAME}.service",
 ])
-def test_inactive_unit_with_queued_start_blocks_adoption(native_inventory, unit: str) -> None:
+def test_inactive_unit_with_queued_start_blocks_adoption(
+    native_inventory: NativeInventory, unit: str,
+) -> None:
     calls, replies = native_inventory
     replies[unit].stdout = "LoadState=loaded\nActiveState=inactive\nJob=42\n"
     with pytest.raises(PolicyError, match=rf"{unit} \(pending job 42\)"):
@@ -285,7 +308,9 @@ def test_inactive_unit_with_queued_start_blocks_adoption(native_inventory, unit:
 
 
 @pytest.mark.parametrize("job", [None, "", "unknown", "-1", "1 start", "42\nJob=0"])
-def test_unverifiable_unit_job_blocks_adoption(native_inventory, job: str | None) -> None:
+def test_unverifiable_unit_job_blocks_adoption(
+    native_inventory: NativeInventory, job: str | None,
+) -> None:
     calls, replies = native_inventory
     unit = f"{legacy.LEGACY_NAME}.service"
     replies[unit].stdout = "LoadState=loaded\nActiveState=inactive\n"
@@ -298,7 +323,8 @@ def test_unverifiable_unit_job_blocks_adoption(native_inventory, job: str | None
 
 @pytest.mark.parametrize("inventory", ["queued", "unavailable"])
 def test_unsettled_legacy_inventory_refuses_before_enrollment(
-    native_inventory, tmp_path: Path, monkeypatch, capsys, inventory: str,
+    native_inventory: NativeInventory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], inventory: str,
 ) -> None:
     from worktree_manager import automatic_updates_autostart as startup
     from worktree_manager import automatic_updates_cli as cli, automatic_updates_process as process
@@ -332,7 +358,9 @@ def test_unsettled_legacy_inventory_refuses_before_enrollment(
     OSError("inspection denied"), subprocess.TimeoutExpired("systemctl", 10),
     SimpleNamespace(returncode=1, stdout="", stderr="user bus unavailable"),
 ])
-def test_timer_inspection_failure_blocks_adoption(native_inventory, failure) -> None:
+def test_timer_inspection_failure_blocks_adoption(
+    native_inventory: NativeInventory, failure: OSError | subprocess.TimeoutExpired | SimpleNamespace,
+) -> None:
     calls, replies = native_inventory
     timer = f"{legacy.LEGACY_NAME}.timer"
     replies[timer] = failure
@@ -341,7 +369,7 @@ def test_timer_inspection_failure_blocks_adoption(native_inventory, failure) -> 
     assert calls == [timer]
 
 
-def test_missing_systemctl_is_unverifiable_not_optional_absence(native_inventory) -> None:
+def test_missing_systemctl_is_unverifiable_not_optional_absence(native_inventory: NativeInventory) -> None:
     calls, replies = native_inventory
     replies[f"{legacy.LEGACY_NAME}.timer"] = FileNotFoundError("systemctl")
     with pytest.raises(PolicyError, match="legacy user-unit inventory failed"):
@@ -349,7 +377,7 @@ def test_missing_systemctl_is_unverifiable_not_optional_absence(native_inventory
     assert calls == [f"{legacy.LEGACY_NAME}.timer"]
 
 
-def test_disappearing_systemctl_still_blocks_after_an_observed_timer(native_inventory) -> None:
+def test_disappearing_systemctl_still_blocks_after_an_observed_timer(native_inventory: NativeInventory) -> None:
     _calls, replies = native_inventory
     replies[f"{legacy.LEGACY_NAME}.timer"].stdout = "LoadState=loaded\nActiveState=active\nJob=0\n"
     replies[f"{legacy.LEGACY_NAME}.service"] = FileNotFoundError("systemctl")
@@ -358,7 +386,7 @@ def test_disappearing_systemctl_still_blocks_after_an_observed_timer(native_inve
 
 
 def test_default_directory_timer_blocks_with_custom_xdg_config(
-    native_inventory, tmp_path: Path,
+    native_inventory: NativeInventory, tmp_path: Path,
 ) -> None:
     calls, _replies = native_inventory
     timer = tmp_path / ".config" / "systemd" / "user" / f"{legacy.LEGACY_NAME}.timer"

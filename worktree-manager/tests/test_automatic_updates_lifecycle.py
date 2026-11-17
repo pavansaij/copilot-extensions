@@ -8,6 +8,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from agent_procutil import DaemonSpawnError
@@ -24,14 +25,14 @@ def _enabled(root: Path) -> None:
 
 
 def test_worker_stays_responsive_and_drains_overdue_update_before_disable(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         worker = runtime.Worker(tmp_path)
         released, started = asyncio.Event(), asyncio.Event()
 
-        async def spawn(*args, **kwargs):
+        async def spawn(*args: Any, **kwargs: Any) -> SimpleNamespace:
             async def wait() -> int:
                 started.set()
                 await released.wait()
@@ -64,7 +65,9 @@ def test_worker_stays_responsive_and_drains_overdue_update_before_disable(
     asyncio.run(exercise())
 
 
-def test_native_supervisor_restarts_only_after_nonowning_worker_qualification(tmp_path: Path, monkeypatch) -> None:
+def test_native_supervisor_restarts_only_after_nonowning_worker_qualification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         worker = runtime.Worker(tmp_path)
@@ -74,7 +77,7 @@ def test_native_supervisor_restarts_only_after_nonowning_worker_qualification(tm
         monkeypatch.setattr(process, "probe", lambda snapshot: {"runtime": str(tmp_path / "new")})
         calls = []
 
-        def qualify(*, timeout):
+        def qualify(*, timeout: float) -> int:
             assert worker.lease.held
             calls.append(timeout)
             return 0
@@ -92,7 +95,9 @@ def test_native_supervisor_restarts_only_after_nonowning_worker_qualification(tm
     asyncio.run(exercise())
 
 
-def test_native_failed_successor_preserves_owner(tmp_path: Path, monkeypatch) -> None:
+def test_native_failed_successor_preserves_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         worker = runtime.Worker(tmp_path)
@@ -107,7 +112,9 @@ def test_native_failed_successor_preserves_owner(tmp_path: Path, monkeypatch) ->
     asyncio.run(exercise())
 
 
-def test_native_qualification_timeout_does_not_spawn_another_live_candidate(tmp_path: Path, monkeypatch) -> None:
+def test_native_qualification_timeout_does_not_spawn_another_live_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         worker = runtime.Worker(tmp_path)
@@ -117,11 +124,11 @@ def test_native_qualification_timeout_does_not_spawn_another_live_candidate(tmp_
         monkeypatch.setattr(process, "probe", lambda snapshot: {"runtime": str(tmp_path / "new")})
         calls = []
 
-        def waiting(*, timeout):
+        def waiting(*, timeout: float) -> int:
             assert worker.lease.held
             raise subprocess.TimeoutExpired("native candidate", timeout)
 
-        def spawn(*args, **kwargs):
+        def spawn(*args: Any, **kwargs: Any) -> SimpleNamespace:
             calls.append(True)
             return SimpleNamespace(poll=lambda: None, wait=waiting)
 
@@ -136,7 +143,9 @@ def test_native_qualification_timeout_does_not_spawn_another_live_candidate(tmp_
     asyncio.run(exercise())
 
 
-def test_native_selection_change_during_qualification_keeps_original_owner(tmp_path: Path, monkeypatch) -> None:
+def test_native_selection_change_during_qualification_keeps_original_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         worker = runtime.Worker(tmp_path)
@@ -146,7 +155,7 @@ def test_native_selection_change_during_qualification_keeps_original_owner(tmp_p
         monkeypatch.setattr(autostart, "native_supervisor_state", lambda root: "systemd")
         monkeypatch.setattr(process, "probe", lambda snapshot: {"runtime": str(tmp_path / "new")})
 
-        def qualify(*, timeout):
+        def qualify(*, timeout: float) -> int:
             selection[0] = tmp_path / "newer"
             return 0
 
@@ -158,13 +167,15 @@ def test_native_selection_change_during_qualification_keeps_original_owner(tmp_p
     asyncio.run(exercise())
 
 
-def test_native_changed_bootstrap_interpreter_preserves_owner(tmp_path: Path, monkeypatch) -> None:
+def test_native_changed_bootstrap_interpreter_preserves_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         _enabled(tmp_path)
         old = runtime.Worker(tmp_path)
         old.lease.acquire()
         loop = asyncio.get_running_loop()
-        candidates = []
+        candidates: list[tuple[runtime.Worker, asyncio.Task[int]]] = []
         monkeypatch.setattr(process, "selected_slot", lambda root: tmp_path / "new")
         monkeypatch.setattr(process, "runtime_identity", lambda: str(tmp_path / "new"))
         monkeypatch.setattr(autostart, "native_supervisor_state", lambda root: "systemd")
@@ -173,12 +184,12 @@ def test_native_changed_bootstrap_interpreter_preserves_owner(tmp_path: Path, mo
             "blockers": ["active service replacement requires separate stop/handover approval"],
         })
 
-        async def launch(standby):
+        async def launch(standby: str) -> SimpleNamespace:
             candidate = runtime.Worker(tmp_path, standby=standby)
             task = asyncio.create_task(candidate.run())
             candidates.append((candidate, task))
 
-            async def outcome():
+            async def outcome() -> int:
                 try:
                     return await task
                 except policy.PolicyError:
@@ -189,7 +200,7 @@ def test_native_changed_bootstrap_interpreter_preserves_owner(tmp_path: Path, mo
                 wait=lambda timeout: asyncio.run_coroutine_threadsafe(outcome(), loop).result(timeout),
             )
 
-        def spawn(root, *, standby):
+        def spawn(root: Path, *, standby: str) -> SimpleNamespace:
             return asyncio.run_coroutine_threadsafe(launch(standby), loop).result(timeout=2)
 
         monkeypatch.setattr(process, "spawn_worker", spawn)
@@ -205,7 +216,9 @@ def test_native_changed_bootstrap_interpreter_preserves_owner(tmp_path: Path, mo
     asyncio.run(exercise())
 
 
-def test_standby_validates_saved_schedule_before_publishing_readiness(tmp_path: Path, monkeypatch) -> None:
+def test_standby_validates_saved_schedule_before_publishing_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         monkeypatch.delenv(autostart.UNIT_ENV, raising=False)
         _enabled(tmp_path)
@@ -223,7 +236,9 @@ def test_standby_validates_saved_schedule_before_publishing_readiness(tmp_path: 
     asyncio.run(exercise())
 
 
-def test_failed_successor_preparation_keeps_current_owner(tmp_path: Path, monkeypatch) -> None:
+def test_failed_successor_preparation_keeps_current_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         worker = runtime.Worker(tmp_path)
         worker.lease.acquire()
@@ -240,14 +255,14 @@ def test_failed_successor_preparation_keeps_current_owner(tmp_path: Path, monkey
 
 
 def test_daemon_broker_failure_does_not_retire_a_healthy_controller(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def exercise() -> None:
         worker = runtime.Worker(tmp_path)
         worker.lease.acquire()
         due = worker.snapshot["next_due"]
 
-        def denied(*args, **kwargs):
+        def denied(*args: object, **kwargs: object) -> None:
             raise DaemonSpawnError("fixture lifetime broker denied launch", cleanup_confirmed=True)
 
         monkeypatch.setattr(process, "spawn_worker", denied)
@@ -261,7 +276,9 @@ def test_daemon_broker_failure_does_not_retire_a_healthy_controller(
     asyncio.run(exercise())
 
 
-def test_failed_activation_reacquires_old_custody(tmp_path: Path, monkeypatch) -> None:
+def test_failed_activation_reacquires_old_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         worker = runtime.Worker(tmp_path)
         worker.lease.acquire()
@@ -280,7 +297,7 @@ def test_failed_activation_reacquires_old_custody(tmp_path: Path, monkeypatch) -
 
 
 def test_real_standby_activation_preserves_due_time_and_single_owner(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def exercise() -> None:
         monkeypatch.delenv(autostart.UNIT_ENV, raising=False)
@@ -292,18 +309,18 @@ def test_real_standby_activation_preserves_due_time_and_single_owner(
         old.snapshot["port"] = 1
         old.publish()
         loop = asyncio.get_running_loop()
-        spawned = []
+        spawned: list[tuple[runtime.Worker, asyncio.Task[int]]] = []
         monkeypatch.setattr(process, "selected_slot", lambda root: tmp_path / "new")
         monkeypatch.setattr(process, "runtime_identity", lambda: str(tmp_path / "new"))
         monkeypatch.setattr(runtime, "POLL_SECONDS", 0.01)
 
-        async def launch(standby: str):
+        async def launch(standby: str) -> SimpleNamespace:
             successor = runtime.Worker(tmp_path, standby=standby)
             task = asyncio.create_task(successor.run())
             spawned.append((successor, task))
             return SimpleNamespace(poll=lambda: task.result() if task.done() else None)
 
-        def spawn(root: Path, *, standby: str):
+        def spawn(root: Path, *, standby: str) -> SimpleNamespace:
             return asyncio.run_coroutine_threadsafe(launch(standby), loop).result(timeout=2)
 
         monkeypatch.setattr(process, "spawn_worker", spawn)
@@ -312,9 +329,10 @@ def test_real_standby_activation_preserves_due_time_and_single_owner(
         assert not old.lease.held
         assert successor.lease.held
         assert successor.snapshot["next_due"] == old.snapshot["next_due"]
-        assert process.read_snapshot(
+        snapshot = process.read_snapshot(
             policy.state_dir(tmp_path) / process.STATUS_NAME,
-        )["worker_id"] == successor.snapshot["worker_id"]
+        )
+        assert snapshot is not None and snapshot["worker_id"] == successor.snapshot["worker_id"]
         policy.configure(tmp_path, owner="disabled", provenance="user")
         assert await asyncio.wait_for(task, timeout=2) == 0
         assert not successor.lease.held

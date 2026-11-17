@@ -10,6 +10,9 @@ from unittest.mock import Mock
 
 import pytest
 
+from _automatic_updates_autostart_fixtures import (
+    LinuxCalls, NativeOwner, NativeSnapshot, WindowsEntries, native_owner as native_owner,
+)
 from worktree_manager import automatic_updates_autostart as autostart
 from worktree_manager import automatic_updates_startup as startup
 
@@ -88,7 +91,7 @@ def windows(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFa
     return entries
 
 
-def test_inspect_never_creates_artifacts(installation: Path, linux: list) -> None:
+def test_inspect_never_creates_artifacts(installation: Path, linux: LinuxCalls) -> None:
     before = sorted(installation.rglob("*"))
     result = autostart.inspect_autostart(installation)
     assert result["registered"] is False
@@ -97,7 +100,7 @@ def test_inspect_never_creates_artifacts(installation: Path, linux: list) -> Non
 
 
 def test_refresh_preview_refuses_changed_native_interpreter_without_writes(
-    installation: Path, linux: list, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = autostart.register_autostart(installation)
     paths = [
@@ -123,12 +126,13 @@ def test_refresh_preview_refuses_changed_native_interpreter_without_writes(
 
 
 def test_linux_register_enables_without_start_and_is_idempotent(
-    installation: Path, linux: list,
+    installation: Path, linux: LinuxCalls,
 ) -> None:
     first = autostart.register_autostart(installation)
     assert first["registered"] is True
     assert first["activation"] == "pending"
-    assert "worker-readiness-not-checked" in first["blockers"]
+    blockers = first["blockers"]
+    assert isinstance(blockers, list) and "worker-readiness-not-checked" in blockers
     assert ("daemon-reload",) in linux
     assert ("enable", first["unit"]) in linux
     assert all(args[0] not in {"start", "restart", "stop"} for args in linux)
@@ -144,17 +148,20 @@ def test_linux_register_enables_without_start_and_is_idempotent(
 
 
 def test_windows_registry_uses_real_gui_and_durable_bootstrap(
-    installation: Path, windows: dict,
+    installation: Path, windows: WindowsEntries,
 ) -> None:
     result = autostart.register_autostart(installation)
     assert result["registered"] is True
     assert result["activation"] == "pending"
-    command = windows[result["name"]]
+    name = result["name"]
+    assert isinstance(name, str)
+    command = windows[name]
     assert "pythonw.exe" in command and "startup.py" in command
     assert "-I -S" in command
     assert "--root" not in command and command.count(str(installation)) == 1
     assert "versions" not in command and "TaskScheduler" not in command
-    assert "logon" in result["lifetime"]
+    lifetime = result["lifetime"]
+    assert isinstance(lifetime, str) and "logon" in lifetime
     assert autostart.register_autostart(installation)["registered"] is True
     assert autostart.remove_autostart(installation)["registered"] is False
     assert not windows
@@ -182,7 +189,7 @@ def test_foreign_entry_refused_without_writes(
 
 @pytest.mark.parametrize("artifact", ["entry", "bootstrap", "receipt"])
 def test_edited_registration_preserved_on_register_and_remove(
-    installation: Path, linux: list, artifact: str,
+    installation: Path, linux: LinuxCalls, artifact: str,
 ) -> None:
     result = autostart.register_autostart(installation)
     directory = installation / "automatic-updates"
@@ -197,7 +204,7 @@ def test_edited_registration_preserved_on_register_and_remove(
 
 
 def test_missing_user_manager_preserves_registration_but_reports_blocked(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         autostart, "_systemctl",
@@ -210,7 +217,7 @@ def test_missing_user_manager_preserves_registration_but_reports_blocked(
 
 
 def test_active_unit_removal_requires_explicit_stop_approval(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = autostart.register_autostart(installation)
     unit = autostart._unit_path(str(registered["name"]))
@@ -228,7 +235,7 @@ def test_active_unit_removal_requires_explicit_stop_approval(
     assert unit.read_bytes() == before
 
 
-def test_linux_remove_disables_but_does_not_stop(installation: Path, linux: list) -> None:
+def test_linux_remove_disables_but_does_not_stop(installation: Path, linux: LinuxCalls) -> None:
     result = autostart.register_autostart(installation)
     assert autostart.remove_autostart(installation)["registered"] is False
     assert ("disable", result["unit"]) in linux
@@ -239,7 +246,7 @@ def test_linux_remove_disables_but_does_not_stop(installation: Path, linux: list
 
 @pytest.mark.parametrize("version", ["../escape", "/outside", "a/b", "0.1\\escape", "..", ""])
 def test_selector_traversal_refused(
-    installation: Path, linux: list, version: str,
+    installation: Path, linux: LinuxCalls, version: str,
 ) -> None:
     (installation / "current-version").write_text(version, encoding="utf-8")
     result = autostart.register_autostart(installation)
@@ -256,7 +263,7 @@ def test_selected_slot_is_resolved_fresh(installation: Path) -> None:
 
 
 def test_constructed_completion_and_interpreter_are_required_without_rebuilding(
-    installation: Path, linux: list,
+    installation: Path, linux: LinuxCalls,
 ) -> None:
     slot = startup.completed_slot(installation)
     (slot / ".install-complete.json").unlink()
@@ -270,7 +277,7 @@ def test_constructed_completion_and_interpreter_are_required_without_rebuilding(
 
 @pytest.mark.parametrize("artifact", ["current-version", "automatic-updates"])
 def test_linked_artifacts_refused(
-    installation: Path, linux: list, tmp_path: Path, artifact: str,
+    installation: Path, linux: LinuxCalls, tmp_path: Path, artifact: str,
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -286,7 +293,7 @@ def test_linked_artifacts_refused(
 
 
 def test_windows_missing_real_gui_refuses_registration(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def refuse(*args: object, **kwargs: object) -> str:
         raise RuntimeError("real base GUI interpreter unavailable")
@@ -300,10 +307,10 @@ def test_windows_bootstrap_invokes_hidden_ensure_without_installation(
     installation: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (installation / "automatic-updates").mkdir()
-    monkeypatch.setattr(startup.sys, "platform", "win32")
-    monkeypatch.setattr(startup.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     runner = Mock(return_value=subprocess.CompletedProcess([], 7))
-    monkeypatch.setattr(startup.subprocess, "run", runner)
+    monkeypatch.setattr(subprocess, "run", runner)
     monkeypatch.setenv("PYTHONPATH", "foreign")
     monkeypatch.setenv("GH_TOKEN", "test-only")
     assert startup.startup(installation) == 7
@@ -327,7 +334,7 @@ def test_systemd_command_quoting_never_uses_a_shell() -> None:
 
 
 def test_damaged_runtime_remains_registered_but_activation_is_blocked(
-    installation: Path, linux: list,
+    installation: Path, linux: LinuxCalls,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
     (installation / "current-version").write_text("../escape", encoding="utf-8")
@@ -337,7 +344,7 @@ def test_damaged_runtime_remains_registered_but_activation_is_blocked(
 
 
 def test_owned_bootstrap_can_be_updated_without_changing_startup_command(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
     monkeypatch.setattr(autostart, "_bootstrap_body", lambda: "changed implementation\n")
@@ -347,13 +354,13 @@ def test_owned_bootstrap_can_be_updated_without_changing_startup_command(
     assert (installation / "automatic-updates/startup.py").read_text() == "changed implementation\n"
 
 
-def test_missing_root_inspection_is_read_only(tmp_path: Path, linux: list) -> None:
+def test_missing_root_inspection_is_read_only(tmp_path: Path, linux: LinuxCalls) -> None:
     absent = tmp_path / "absent"
     assert autostart.inspect_autostart(absent)["activation"] == "blocked"
     assert not absent.exists()
 
 
-def test_receipt_records_exact_body_and_not_only_a_marker(installation: Path, windows: dict) -> None:
+def test_receipt_records_exact_body_and_not_only_a_marker(installation: Path, windows: WindowsEntries) -> None:
     autostart.register_autostart(installation)
     directory = installation / "automatic-updates"
     receipt = json.loads((directory / "autostart.json").read_text(encoding="utf-8"))
@@ -364,7 +371,7 @@ def test_receipt_records_exact_body_and_not_only_a_marker(installation: Path, wi
 
 
 def test_failed_bootstrap_update_restores_owned_bytes(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
     directory = installation / "automatic-updates"
@@ -387,7 +394,7 @@ def test_failed_bootstrap_update_restores_owned_bytes(
 
 
 def test_registry_failure_leaves_no_unowned_bootstrap(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def refuse(*args: object) -> None:
         raise OSError("injected registry failure")
@@ -405,11 +412,11 @@ def test_linux_startup_execs_retained_worker_without_acquisition(
 ) -> None:
     expected = startup.completed_slot(installation) / "bin/python"
     probe = Mock(side_effect=AssertionError("startup must not run an acquisition command"))
-    monkeypatch.setattr(startup.subprocess, "run", probe)
+    monkeypatch.setattr(subprocess, "run", probe)
     command = Mock(side_effect=RuntimeError("exec observed"))
-    monkeypatch.setattr(startup.sys, "platform", "linux")
-    monkeypatch.setattr(startup.os, "execve", command)
-    monkeypatch.setattr(startup.os, "chdir", Mock())
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "execve", command)
+    monkeypatch.setattr(os, "chdir", Mock())
     with pytest.raises(RuntimeError, match="exec observed"):
         startup.startup(installation)
     executable, argv, environment = command.call_args.args
@@ -420,7 +427,7 @@ def test_linux_startup_execs_retained_worker_without_acquisition(
 
 
 def test_disabled_unit_is_not_reported_as_activated(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     autostart.register_autostart(installation)
     monkeypatch.setattr(
@@ -436,7 +443,7 @@ def test_disabled_unit_is_not_reported_as_activated(
 
 
 def test_late_foreign_service_is_not_deleted(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = autostart.register_autostart(installation)
     unit = autostart._unit_path(str(registered["name"]))
@@ -454,7 +461,7 @@ def test_late_foreign_service_is_not_deleted(
 
 
 def test_registration_preserves_unchanged_bootstrap_identity(
-    installation: Path, windows: dict,
+    installation: Path, windows: WindowsEntries,
 ) -> None:
     autostart.register_autostart(installation)
     path = installation / "automatic-updates/startup.py"
@@ -464,7 +471,7 @@ def test_registration_preserves_unchanged_bootstrap_identity(
     assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
 
 
-def test_null_ownership_receipt_is_not_adopted(installation: Path, linux: list) -> None:
+def test_null_ownership_receipt_is_not_adopted(installation: Path, linux: LinuxCalls) -> None:
     directory = installation / "automatic-updates"
     directory.mkdir()
     receipt = directory / "autostart.json"
@@ -474,7 +481,7 @@ def test_null_ownership_receipt_is_not_adopted(installation: Path, linux: list) 
 
 
 def test_missing_interpreter_refuses_registration(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (startup.completed_slot(installation) / "bin/python").unlink()
     result = autostart.register_autostart(installation)
@@ -494,7 +501,7 @@ def test_windows_startup_uses_fixed_native_interpreter(
 
 
 def test_inactive_broken_runtime_can_still_be_unregistered(
-    installation: Path, linux: list,
+    installation: Path, linux: LinuxCalls,
 ) -> None:
     registered = autostart.register_autostart(installation)
     (installation / "current-version").write_text("../invalid", encoding="utf-8")
@@ -504,7 +511,7 @@ def test_inactive_broken_runtime_can_still_be_unregistered(
 
 
 def test_repeat_remove_does_not_disable_a_missing_unit(
-    installation: Path, linux: list,
+    installation: Path, linux: LinuxCalls,
 ) -> None:
     autostart.register_autostart(installation)
     autostart.remove_autostart(installation)
@@ -513,53 +520,14 @@ def test_repeat_remove_does_not_disable_a_missing_unit(
     assert all(call[0] not in {"disable", "daemon-reload"} for call in linux)
 
 
-@pytest.fixture
-def native_owner(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
-) -> tuple[dict[str, str], dict[int, tuple]]:
-    registered = autostart.register_autostart(installation)
-    unit = str(registered["unit"])
-    name = str(registered["name"])
-    group = f"/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}"
-    fields = {
-        "Id": unit, "ActiveState": "active", "UnitFileState": "enabled",
-        "MainPID": str(os.getpid() + 100000), "ControlGroup": group,
-        "FragmentPath": str(autostart._unit_path(name)), "NeedDaemonReload": "no",
-        "KillMode": "process", "SendSIGKILL": "no", "TimeoutStopUSec": "infinity",
-        "DropInPaths": "",
-    }
-    snapshots = {
-        int(fields["MainPID"]): (
-            100, 1, (sys.executable, "-I", "-S",
-                     str(installation / "automatic-updates/startup.py"),
-                     "--root", str(installation)), (group,),
-        ),
-        os.getpid(): (
-            200, int(fields["MainPID"]),
-            (sys.executable, "-m", "worktree_manager", "automatic-updates",
-             "run", "--root", str(installation)), (group,),
-        ),
-        1: (1, 0, ("init",), ("/",)),
-    }
-    monkeypatch.setattr(
-        autostart, "_systemctl",
-        lambda *args: subprocess.CompletedProcess(
-            args, 0, "\n".join(f"{key}={value}" for key, value in fields.items()), "",
-        ),
-    )
-    monkeypatch.setattr(startup, "process_snapshot", lambda pid: snapshots[pid])
-    monkeypatch.delenv(autostart.UNIT_ENV, raising=False)
-    return fields, snapshots
-
-
 def test_native_supervisor_proves_owner_without_trusting_environment(
-    installation: Path, native_owner: tuple,
+    installation: Path, native_owner: NativeOwner,
 ) -> None:
     assert autostart.native_supervisor_state(installation) == "systemd"
 
 
 def test_native_supervisor_accepts_retained_exec_replacing_mainpid(
-    installation: Path, native_owner: tuple,
+    installation: Path, native_owner: NativeOwner,
 ) -> None:
     fields, snapshots = native_owner
     fields["MainPID"] = str(os.getpid())
@@ -578,7 +546,7 @@ def test_native_supervisor_accepts_retained_exec_replacing_mainpid(
     ("TimeoutStopUSec", "30s"), ("DropInPaths", "/foreign.conf"),
 ])
 def test_native_supervisor_defers_unverified_or_unsafe_owner(
-    installation: Path, native_owner: tuple, field: str, value: str,
+    installation: Path, native_owner: NativeOwner, field: str, value: str,
 ) -> None:
     fields, _ = native_owner
     fields[field] = value
@@ -586,7 +554,7 @@ def test_native_supervisor_defers_unverified_or_unsafe_owner(
 
 
 def test_native_supervisor_requires_real_mainpid_ancestry(
-    installation: Path, native_owner: tuple,
+    installation: Path, native_owner: NativeOwner,
 ) -> None:
     _, snapshots = native_owner
     started, _, argv, groups = snapshots[os.getpid()]
@@ -595,7 +563,7 @@ def test_native_supervisor_requires_real_mainpid_ancestry(
 
 
 def test_native_supervisor_requires_cgroup_membership(
-    installation: Path, native_owner: tuple,
+    installation: Path, native_owner: NativeOwner,
 ) -> None:
     _, snapshots = native_owner
     started, parent, argv, _ = snapshots[os.getpid()]
@@ -604,7 +572,7 @@ def test_native_supervisor_requires_cgroup_membership(
 
 
 def test_native_supervisor_rejects_foreign_process_command(
-    installation: Path, native_owner: tuple,
+    installation: Path, native_owner: NativeOwner,
 ) -> None:
     fields, snapshots = native_owner
     pid = int(fields["MainPID"])
@@ -614,13 +582,13 @@ def test_native_supervisor_rejects_foreign_process_command(
 
 
 def test_native_supervisor_checks_process_start_identity_again(
-    installation: Path, native_owner: tuple, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, native_owner: NativeOwner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fields, snapshots = native_owner
     main = int(fields["MainPID"])
     calls = 0
 
-    def snapshot(pid: int) -> tuple:
+    def snapshot(pid: int) -> NativeSnapshot:
         nonlocal calls
         value = snapshots[pid]
         if pid == main:
@@ -634,7 +602,7 @@ def test_native_supervisor_checks_process_start_identity_again(
 
 
 def test_exported_marker_alone_never_proves_native_ownership(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, _, name = autostart._paths(installation)
     monkeypatch.setenv(autostart.UNIT_ENV, f"{name}.service")
@@ -645,7 +613,7 @@ def test_exported_marker_alone_never_proves_native_ownership(
 
 
 def test_standalone_worker_has_no_native_owner(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(autostart.UNIT_ENV, raising=False)
     monkeypatch.setattr(
@@ -654,7 +622,7 @@ def test_standalone_worker_has_no_native_owner(
     assert autostart.native_supervisor_state(installation) == "none"
 
 
-def test_native_unit_preserves_update_children(installation: Path, linux: list) -> None:
+def test_native_unit_preserves_update_children(installation: Path, linux: LinuxCalls) -> None:
     registered = autostart.register_autostart(installation)
     body = autostart._unit_path(str(registered["name"])).read_text(encoding="utf-8")
     assert "KillMode=process\n" in body
@@ -664,7 +632,7 @@ def test_native_unit_preserves_update_children(installation: Path, linux: list) 
 
 
 def test_activate_linux_starts_owned_unit_without_restart(
-    installation: Path, native_owner: tuple, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, native_owner: NativeOwner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fields, _ = native_owner
     fields["ActiveState"] = "inactive"
@@ -686,7 +654,7 @@ def test_activate_linux_starts_owned_unit_without_restart(
 
 
 def test_activate_preserves_blocked_registration(
-    installation: Path, native_owner: tuple, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, native_owner: NativeOwner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fields, _ = native_owner
     fields["UnitFileState"] = "disabled"
@@ -700,7 +668,7 @@ def test_activate_preserves_blocked_registration(
 
 
 def test_activate_failure_preserves_registered_state_and_diagnostic(
-    installation: Path, native_owner: tuple, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, native_owner: NativeOwner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = autostart._systemctl
 
@@ -716,14 +684,14 @@ def test_activate_failure_preserves_registered_state_and_diagnostic(
     assert "injected activation failure" in str(result["blockers"])
 
 
-def test_activate_refuses_unowned_registration(installation: Path, linux: list) -> None:
+def test_activate_refuses_unowned_registration(installation: Path, linux: LinuxCalls) -> None:
     result = autostart.activate_autostart(installation)
     assert result["activation"] == "blocked"
     assert all(args[0] == "show" for args in linux)
 
 
 def test_activate_windows_is_pending_without_starting_anything(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     autostart.register_autostart(installation)
     forbidden = Mock(side_effect=AssertionError("Windows activation must not spawn"))
@@ -734,7 +702,7 @@ def test_activate_windows_is_pending_without_starting_anything(
 
 
 def test_unchanged_registration_never_publishes_or_reloads(
-    installation: Path, linux: list, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, linux: LinuxCalls, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     autostart.register_autostart(installation)
     linux.clear()
@@ -747,7 +715,7 @@ def test_unchanged_registration_never_publishes_or_reloads(
 
 
 def test_active_owned_bootstrap_refresh_does_not_reload_unit(
-    installation: Path, native_owner: tuple, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, native_owner: NativeOwner, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = autostart._systemctl
     recorder = Mock(side_effect=original)
@@ -765,7 +733,7 @@ def test_active_owned_bootstrap_refresh_does_not_reload_unit(
     {"version": "0.1.0-dev97", "payload_hash": ""},
 ])
 def test_startup_refuses_unattributed_completion(
-    installation: Path, payload: dict,
+    installation: Path, payload: dict[str, object],
 ) -> None:
     slot = startup.completed_slot(installation)
     (slot / ".install-complete.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -779,7 +747,7 @@ def test_missing_retention_bootstrap_never_executes_worker(
 ) -> None:
     (startup.completed_slot(installation) / ".runtime-bootstrap/runtime_launcher.py").unlink()
     forbidden = Mock(side_effect=AssertionError("failed preparation must not exec"))
-    monkeypatch.setattr(startup.os, "execve", forbidden)
+    monkeypatch.setattr(os, "execve", forbidden)
     with pytest.raises(FileNotFoundError):
         startup.startup(installation)
     forbidden.assert_not_called()
@@ -831,7 +799,7 @@ def test_selected_retained_command_does_not_follow_later_selector_change(
 
 
 def test_owned_bootstrap_infers_root_not_ambient_configuration(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
     script = installation / "automatic-updates/startup.py"
@@ -846,7 +814,7 @@ def test_owned_bootstrap_infers_root_not_ambient_configuration(
 
 
 def test_source_module_requires_explicit_root(
-    installation: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    installation: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     run = Mock(side_effect=AssertionError("source execution cannot infer a deployment"))
     monkeypatch.setattr(startup, "startup", run)
@@ -867,7 +835,7 @@ def test_source_module_requires_explicit_root(
     ("bootstrap", "0" * 64), ("version", True), ("platform", "foreign"),
 ])
 def test_implicit_root_requires_exact_owned_receipt(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
     field: str, value: object,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
@@ -881,7 +849,7 @@ def test_implicit_root_requires_exact_owned_receipt(
 
 
 def test_implicit_root_never_infers_a_checkout(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
     (installation / ".git").mkdir()
@@ -925,7 +893,7 @@ def oversized_gui(
 
 
 def test_oversized_new_run_entry_publishes_no_artifacts_or_registry(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     oversized_gui(installation, monkeypatch, tmp_path_factory)
@@ -942,7 +910,7 @@ def test_oversized_new_run_entry_publishes_no_artifacts_or_registry(
 
 
 def test_rejected_long_replacement_preserves_healthy_owned_registration(
-    installation: Path, windows: dict, monkeypatch: pytest.MonkeyPatch,
+    installation: Path, windows: WindowsEntries, monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     assert autostart.register_autostart(installation)["registered"] is True
@@ -961,7 +929,7 @@ def test_rejected_long_replacement_preserves_healthy_owned_registration(
 
 
 def test_existing_owned_long_entry_is_blocked_and_repairable(
-    installation: Path, windows: dict,
+    installation: Path, windows: WindowsEntries,
 ) -> None:
     registered = autostart.register_autostart(installation)
     directory = installation / "automatic-updates"
@@ -974,11 +942,12 @@ def test_existing_owned_long_entry_is_blocked_and_repairable(
     assert result["activation"] == "blocked" and "261 UTF-16" in str(result["blockers"])
     repaired = autostart.register_autostart(installation)
     assert repaired["registered"] is True and repaired["activation"] == "pending"
-    assert repaired["command_utf16_units"] <= 260
+    units = repaired["command_utf16_units"]
+    assert isinstance(units, int) and units <= 260
     assert "--root" not in windows[str(registered["name"])]
 
 
-def test_linux_registered_command_keeps_explicit_root(installation: Path, linux: list) -> None:
+def test_linux_registered_command_keeps_explicit_root(installation: Path, linux: LinuxCalls) -> None:
     command = autostart._command(installation, installation / "automatic-updates", "linux")
     assert command[-2:] == ["--root", str(installation)]
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -18,7 +20,7 @@ from worktree_manager import automatic_updates_process as process
 
 
 @pytest.fixture
-def enrollment(tmp_path: Path, monkeypatch) -> Path:
+def enrollment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -41,7 +43,7 @@ def _enable(root: Path, *, harness: bool = False) -> list[str]:
 @pytest.mark.parametrize("binding", ["AGENT_HOME", "COPILOT_EXTENSIONS_CONTEXT"])
 @pytest.mark.parametrize("harness", [False, True])
 def test_unpersisted_installation_binding_blocks_before_any_write(
-    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     binding: str, harness: bool,
 ) -> None:
     monkeypatch.setenv(binding, str(enrollment.parent / "session-only"))
@@ -60,7 +62,7 @@ def test_unpersisted_installation_binding_blocks_before_any_write(
 @pytest.mark.parametrize("variable", ["HOME", "USERPROFILE"])
 @pytest.mark.parametrize("use_redirected_root", [False, True])
 def test_process_profile_override_cannot_hide_enrollment_from_legacy_controllers(
-    enrollment: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+    enrollment: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     variable: str, use_redirected_root: bool,
 ) -> None:
     redirected = tmp_path / "process-only-home"
@@ -78,7 +80,7 @@ def test_process_profile_override_cannot_hide_enrollment_from_legacy_controllers
     ensure.assert_not_called()
 
 
-@pytest.mark.skipif(process.os.name == "nt", reason="passwd-database profile")
+@pytest.mark.skipif(os.name == "nt", reason="passwd-database profile")
 def test_posix_enrollment_profile_comes_from_account_not_process_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,7 +103,7 @@ def test_windows_account_profile_uses_existing_shell_api_without_environment_fal
 
     account = tmp_path / "account"
 
-    def resolve(window, folder, token, flags, buffer):
+    def resolve(window: int | None, folder: int, token: int | None, flags: int, buffer: Any) -> int:
         assert (window, folder, token, flags) == (None, 40, None, 0)
         buffer.value = str(account)
         return status
@@ -122,7 +124,7 @@ def test_windows_account_profile_uses_existing_shell_api_without_environment_fal
 
 
 def test_user_disable_still_precedes_unsupported_setup_binding(
-    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     policy.configure(enrollment, owner="disabled", provenance="user")
     monkeypatch.setenv("AGENT_HOME", str(enrollment.parent / "session-only"))
@@ -134,7 +136,9 @@ def test_user_disable_still_precedes_unsupported_setup_binding(
     register.assert_not_called()
 
 
-def test_enrollment_holds_inventory_and_consent_transaction(enrollment, monkeypatch, capsys) -> None:
+def test_enrollment_holds_inventory_and_consent_transaction(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     def inventory() -> None:
         with pytest.raises(CutoverLockedError):
             with CutoverLock(policy.state_dir(enrollment) / "update-transaction"):
@@ -153,13 +157,15 @@ def test_enrollment_holds_inventory_and_consent_transaction(enrollment, monkeypa
     assert result["startup"]["worker_readiness"] == "verified"
 
 
-def test_registration_block_is_not_hidden_by_an_existing_worker(enrollment, monkeypatch, capsys) -> None:
+def test_registration_block_is_not_hidden_by_an_existing_worker(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.setattr(startup, "register_autostart", lambda root: {
         "registered": True, "activation": "blocked", "blockers": ["unit-is-foreign"],
     })
     monkeypatch.setattr(process, "worker_status", lambda root: {"running": True})
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("blocked native registration must not spawn a fallback")
 
     monkeypatch.setattr(process, "ensure_worker", forbidden)
@@ -170,7 +176,9 @@ def test_registration_block_is_not_hidden_by_an_existing_worker(enrollment, monk
     assert result["worker"]["running"]
 
 
-def test_activation_pending_does_not_claim_running(enrollment, monkeypatch, capsys) -> None:
+def test_activation_pending_does_not_claim_running(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.setattr(startup, "register_autostart", lambda root: {
         "registered": True, "activation": "pending", "blockers": ["worker-readiness-not-checked"],
     })
@@ -183,8 +191,10 @@ def test_activation_pending_does_not_claim_running(enrollment, monkeypatch, caps
     assert result["worker"]["running"] is False
 
 
-@pytest.mark.skipif(process.os.name == "nt", reason="native Linux activation branch")
-def test_linux_ensure_activates_native_unit_without_detached_fallback(enrollment, monkeypatch) -> None:
+@pytest.mark.skipif(os.name == "nt", reason="native Linux activation branch")
+def test_linux_ensure_activates_native_unit_without_detached_fallback(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     policy.configure(enrollment, owner="manager", provenance="user", project="example")
     running = False
     activated = []
@@ -193,13 +203,13 @@ def test_linux_ensure_activates_native_unit_without_detached_fallback(enrollment
     })
     monkeypatch.setattr(process, "worker_status", lambda root: {"running": running})
 
-    def activate(root: Path) -> dict:
+    def activate(root: Path) -> dict[str, str]:
         nonlocal running
         activated.append(root)
         running = True
         return {"activation": "pending"}
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("a registered Linux unit owns this process lifetime")
 
     monkeypatch.setattr(startup, "activate_autostart", activate)
@@ -208,8 +218,10 @@ def test_linux_ensure_activates_native_unit_without_detached_fallback(enrollment
     assert activated == [enrollment]
 
 
-@pytest.mark.skipif(process.os.name == "nt", reason="native Linux activation branch")
-def test_unhosted_worker_is_a_native_activation_blocker(enrollment, monkeypatch) -> None:
+@pytest.mark.skipif(os.name == "nt", reason="native Linux activation branch")
+def test_unhosted_worker_is_a_native_activation_blocker(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     policy.configure(enrollment, owner="manager", provenance="user", project="example")
     monkeypatch.setattr(startup, "inspect_autostart", lambda root: {
         "registered": True, "service_active": False,
@@ -223,7 +235,9 @@ def test_unhosted_worker_is_a_native_activation_blocker(enrollment, monkeypatch)
     assert "outside the registered native unit" in result["reason"]
 
 
-def test_invalid_preview_is_not_a_success_shaped_plan(tmp_path: Path, capsys) -> None:
+def test_invalid_preview_is_not_a_success_shaped_plan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     assert cli.main([
         "enable", "--root", str(tmp_path / "absent"), "--interval-seconds", "0", "--json",
     ]) == 1
@@ -233,7 +247,7 @@ def test_invalid_preview_is_not_a_success_shaped_plan(tmp_path: Path, capsys) ->
 
 @pytest.mark.parametrize("running", [False, True])
 def test_ensure_propagates_inspection_block_before_spawn_or_success(
-    enrollment, monkeypatch, running: bool,
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, running: bool,
 ) -> None:
     policy.configure(enrollment, owner="manager", provenance="user", project="example")
     monkeypatch.setattr(startup, "inspect_autostart", lambda root: {
@@ -241,7 +255,7 @@ def test_ensure_propagates_inspection_block_before_spawn_or_success(
     })
     monkeypatch.setattr(process, "worker_status", lambda root: {"running": running})
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("ownership failure cannot authorize a detached fallback")
 
     monkeypatch.setattr(process, "spawn_worker", forbidden)
@@ -252,8 +266,10 @@ def test_ensure_propagates_inspection_block_before_spawn_or_success(
     assert result["reason"] == ["foreign-startup-entry"]
 
 
-def test_missing_project_refuses_before_consent_or_startup(enrollment, monkeypatch, capsys) -> None:
-    def forbidden(*args, **kwargs):
+def test_missing_project_refuses_before_consent_or_startup(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("missing project cannot authorize startup")
 
     monkeypatch.setattr(startup, "register_autostart", forbidden)
@@ -262,12 +278,12 @@ def test_missing_project_refuses_before_consent_or_startup(enrollment, monkeypat
     assert not (enrollment / policy.POLICY_NAME).exists()
 
 
-def test_project_verification_reads_strict_registration_only(monkeypatch) -> None:
+def test_project_verification_reads_strict_registration_only(monkeypatch: pytest.MonkeyPatch) -> None:
     from worktree_manager import harness_state
 
     calls = []
 
-    def registry(**kwargs):
+    def registry(**kwargs: object) -> dict[str, Any]:
         calls.append(kwargs)
         return {"projects": {"example": {"config_dir": "owned"}}}
 
@@ -279,7 +295,7 @@ def test_project_verification_reads_strict_registration_only(monkeypatch) -> Non
 
 
 def test_native_unit_has_deliberate_user_tool_path_without_checkout_paths(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -291,7 +307,7 @@ def test_native_unit_has_deliberate_user_tool_path_without_checkout_paths(
 
 
 def test_alternate_root_cannot_hide_owner_from_legacy_controllers(
-    tmp_path: Path, monkeypatch, capsys,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -304,7 +320,7 @@ def test_alternate_root_cannot_hide_owner_from_legacy_controllers(
 
 
 def test_disable_retains_user_preference_but_reports_residual_legacy_jobs(
-    enrollment, monkeypatch, capsys,
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     def residual() -> None:
         raise policy.PolicyError("an inactive pre-flag fleet task still exists")
@@ -319,16 +335,18 @@ def test_disable_retains_user_preference_but_reports_residual_legacy_jobs(
     assert "pre-flag fleet task" in result["reason"]
 
 
-def test_effective_user_disable_is_rechecked_before_startup(enrollment, monkeypatch, capsys) -> None:
-    original = cli.configure
+def test_effective_user_disable_is_rechecked_before_startup(
+    enrollment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    original = policy.configure
 
-    def user_disables_before_publication(root: Path, **kwargs):
+    def user_disables_before_publication(root: Path, **kwargs: Any) -> policy.Policy:
         policy.atomic_json(root / policy.POLICY_NAME, asdict(policy.Policy(
             provenance="user", user_disabled=True,
         )))
         return original(root, **kwargs)
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("effective user disable must prevent startup registration")
 
     monkeypatch.setattr(cli, "configure", user_disables_before_publication)

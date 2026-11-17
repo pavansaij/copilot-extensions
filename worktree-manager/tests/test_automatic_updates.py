@@ -8,11 +8,13 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Literal, TypedDict
 
 import pytest
 from zdd.cutover_lock import CutoverLock, CutoverLockedError
@@ -23,9 +25,11 @@ from worktree_manager import automatic_updates_process as process
 from worktree_manager import automatic_updates_runtime as runtime
 
 
-def test_constructed_worker_identity_is_its_retained_generation(tmp_path, monkeypatch):
+def test_constructed_worker_identity_is_its_retained_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     slot = tmp_path / "versions" / "1.2.3"
-    monkeypatch.setattr(process.sys, "prefix", str(slot))
+    monkeypatch.setattr(sys, "prefix", str(slot))
     assert process.runtime_identity() == str(slot)
 
 
@@ -36,7 +40,9 @@ def test_default_off_read_has_no_side_effect(tmp_path: Path) -> None:
     assert not root.exists()
 
 
-def test_cli_preview_and_ownership_are_read_only(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_cli_preview_and_ownership_are_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(cli, "_os_account_home", lambda: tmp_path)
@@ -51,13 +57,13 @@ def test_cli_preview_and_ownership_are_read_only(tmp_path: Path, monkeypatch, ca
 
 
 def test_cli_harness_disable_precedence_has_no_startup_mutation(
-    tmp_path: Path, monkeypatch, capsys,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     from worktree_manager import automatic_updates_autostart as autostart
 
     policy.configure(tmp_path, owner="disabled", provenance="user")
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("setup must not change startup after explicit user disable")
 
     monkeypatch.setattr(autostart, "register_autostart", forbidden)
@@ -67,7 +73,9 @@ def test_cli_harness_disable_precedence_has_no_startup_mutation(
     assert json.loads(capsys.readouterr().out)["state"] == "user-disabled"
 
 
-def test_cli_requires_explicit_harness_provenance(tmp_path: Path, capsys) -> None:
+def test_cli_requires_explicit_harness_provenance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     assert cli.main(["enroll", "--root", str(tmp_path), "--json"]) == 1
     assert "requires --harness" in json.loads(capsys.readouterr().out)["reason"]
 
@@ -103,8 +111,15 @@ def test_user_disable_wins_setup_but_user_can_enable(tmp_path: Path) -> None:
     assert policy.load_policy(tmp_path) == enabled
 
 
+class HarnessOptions(TypedDict):
+    owner: Literal["manager"]
+    provenance: str
+    harness: bool
+    project: str
+
+
 def test_setup_idempotent_and_conflicts_loud(tmp_path: Path) -> None:
-    kwargs = dict(owner="manager", provenance="harness:example", harness=True, project="example")
+    kwargs: HarnessOptions = dict(owner="manager", provenance="harness:example", harness=True, project="example")
     first = policy.configure(tmp_path, **kwargs)
     stamp = (tmp_path / policy.POLICY_NAME).stat().st_mtime_ns
     assert policy.configure(tmp_path, **kwargs) == first
@@ -139,11 +154,13 @@ def test_external_handover_requires_disable(tmp_path: Path) -> None:
 
 
 def test_manual_and_automatic_admission(tmp_path: Path) -> None:
-    assert policy.admit_trigger(tmp_path, "legacy-agent-machines").owner == "disabled"
+    legacy = policy.admit_trigger(tmp_path, "legacy-agent-machines")
+    assert legacy is not None and legacy.owner == "disabled"
     with pytest.raises(policy.PolicyError, match="refused"):
         policy.admit_trigger(tmp_path, "manager")
     policy.configure(tmp_path, owner="manager", provenance="user", project="example")
-    assert policy.admit_trigger(tmp_path, "manager").owner == "manager"
+    manager = policy.admit_trigger(tmp_path, "manager")
+    assert manager is not None and manager.owner == "manager"
     assert policy.admit_trigger(tmp_path, None) is None
     with pytest.raises(policy.PolicyError, match="refused"):
         policy.admit_trigger(tmp_path, "legacy-agent-machines")
@@ -190,7 +207,7 @@ def test_unreadable_automatic_policy_does_not_block_manual_update(
 ) -> None:
     read_text = Path.read_text
 
-    def deny_policy(path: Path, *args, **kwargs) -> str:
+    def deny_policy(path: Path, *args: Any, **kwargs: Any) -> str:
         if path == tmp_path / policy.POLICY_NAME:
             raise PermissionError("fixture policy is unreadable")
         return read_text(path, *args, **kwargs)
@@ -206,7 +223,8 @@ def test_unreadable_automatic_policy_does_not_block_manual_update(
 
 def test_external_trigger_is_controller_specific(tmp_path: Path) -> None:
     policy.configure(tmp_path, owner="external", provenance="user", external_controller="one")
-    assert policy.admit_trigger(tmp_path, "external", "one").owner == "external"
+    external = policy.admit_trigger(tmp_path, "external", "one")
+    assert external is not None and external.owner == "external"
     for trigger, controller in (("external", None), ("external", "two"), ("manager", None)):
         with pytest.raises(policy.PolicyError):
             policy.admit_trigger(tmp_path, trigger, controller)
@@ -225,7 +243,7 @@ def test_configure_cannot_change_owner_during_active_update(tmp_path: Path) -> N
     ["--auto", "--automatic-trigger", "manager"],
 ])
 def test_update_guard_strips_only_its_flags_and_serializes(
-    tmp_path: Path, monkeypatch, automatic_flags: list[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_flags: list[str],
 ) -> None:
     monkeypatch.setattr(cli, "default_root", lambda: tmp_path)
     monkeypatch.setenv("COPILOT_EXTENSIONS_UPDATE_HOME", str(tmp_path / "telemetry"))
@@ -253,7 +271,8 @@ def test_update_guard_strips_only_its_flags_and_serializes(
     (False, 3, "configuration_limitation", "automatic_policy_refused"),
 ])
 def test_guard_refusal_keeps_canonical_result_and_telemetry(
-    tmp_path: Path, monkeypatch, locked: bool, code: int, outcome: str, error_code: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    locked: bool, code: int, outcome: str, error_code: str,
 ) -> None:
     telemetry = tmp_path / "telemetry"
     monkeypatch.setattr(cli, "default_root", lambda: tmp_path)
@@ -295,7 +314,9 @@ def test_selected_command_rejects_uninstalled_and_traversal(tmp_path: Path) -> N
         process.selected_slot(tmp_path)
 
 
-def test_environment_clears_session_and_run_identity(tmp_path: Path, monkeypatch) -> None:
+def test_environment_clears_session_and_run_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "PYTHONPATH", "VIRTUAL_ENV", "GIT_ASKPASS",
                 "SSH_ASKPASS", "SUDO_ASKPASS", "COPILOT_EXTENSIONS_UPDATE_RUN_ID",
                 "COPILOT_EXTENSIONS_UPDATE_EVENTS", "COPILOT_EXTENSIONS_UPDATE_OWNER",
@@ -335,7 +356,9 @@ def test_worker_engine_root_does_not_depend_on_a_prior_session_override(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="detached POSIX OpenSSH control; Windows environment contract is shared")
-def test_unattended_ssh_never_invokes_askpass(tmp_path: Path, monkeypatch) -> None:
+def test_unattended_ssh_never_invokes_askpass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     keygen = shutil.which("ssh-keygen")
     if keygen is None:
         pytest.skip("OpenSSH key tools unavailable; environment contract remains covered")
@@ -377,7 +400,7 @@ def test_unattended_ssh_never_invokes_askpass(tmp_path: Path, monkeypatch) -> No
 
 
 def test_targeted_updates_share_automatic_admission_and_preserve_trigger(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from worktree_manager import __main__ as manager, installation_updates
 
@@ -385,7 +408,9 @@ def test_targeted_updates_share_automatic_admission_and_preserve_trigger(
     monkeypatch.setenv("COPILOT_EXTENSIONS_UPDATE_HOME", str(tmp_path / "telemetry"))
     calls = []
 
-    def targeted(arguments, *, trigger="manual", automatic_trigger=None):
+    def targeted(
+        arguments: list[str], *, trigger: str = "manual", automatic_trigger: str | None = None,
+    ) -> int:
         calls.append((arguments, trigger, automatic_trigger))
         return 0
 
@@ -403,7 +428,7 @@ def test_targeted_updates_share_automatic_admission_and_preserve_trigger(
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_public_targeted_executor_applies_policy_and_consumes_manager_only_flags(
-    tmp_path: Path, monkeypatch, enabled: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool,
 ) -> None:
     import update_driver
     from worktree_manager import engine_client, update_driver_cli as boundary
@@ -428,20 +453,22 @@ def test_public_targeted_executor_applies_policy_and_consumes_manager_only_flags
         request_id = "targeted-executor"
         root = tmp_path
 
-        def __enter__(self):
+        def __enter__(self) -> Custody:
             return self
 
-        def __exit__(self, *_args):
+        def __exit__(self, *_args: object) -> None:
             pass
 
-        def assert_owned(self):
+        def assert_owned(self) -> None:
             pass
 
     calls = []
     monkeypatch.setattr(update_driver, "borrowed_custody", Custody)
     monkeypatch.setattr(update_driver, "status", lambda *a, **k: request)
-    monkeypatch.setattr(engine_client, "run_engine_passthrough", lambda project, args:
-        calls.append((project, args)) or 0)
+    def passthrough(project: str | None, args: list[str]) -> int:
+        calls.append((project, args))
+        return 0
+    monkeypatch.setattr(engine_client, "run_engine_passthrough", passthrough)
     assert boundary.cmd_update_request(arguments) == (0 if enabled else 3)
     assert calls == (
         [("example", ["update", "--no-manager", "--target", "agent-bridge", "--auto"])]
@@ -474,7 +501,7 @@ def test_health_proves_live_worker_and_rejects_wrong_cookie(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("exit_code", [0, 4, 5, 1])
 def test_cycle_uses_fresh_canonical_command_and_result(
-    tmp_path: Path, monkeypatch, exit_code: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int,
 ) -> None:
     policy.configure(tmp_path, owner="manager", provenance="user", project="example")
     worker = runtime.Worker(tmp_path)
@@ -485,7 +512,7 @@ def test_cycle_uses_fresh_canonical_command_and_result(
         commands.append((root, args))
         return ["selected-runtime", *args]
 
-    async def spawn(*args, **kwargs):
+    async def spawn(*args: Any, **kwargs: Any) -> SimpleNamespace:
         launches.append((args, kwargs))
 
         async def wait() -> int:
@@ -508,8 +535,8 @@ def test_cycle_uses_fresh_canonical_command_and_result(
     ] == exit_code
 
 
-def test_disabled_cycle_never_launches(tmp_path: Path, monkeypatch) -> None:
-    def forbidden(*args, **kwargs):
+def test_disabled_cycle_never_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("disabled worker launched a command")
 
     monkeypatch.setattr(process, "selected_command", forbidden)
@@ -537,7 +564,9 @@ def test_invalid_saved_schedule_is_visible(tmp_path: Path, change: dict[str, obj
         runtime.Worker(tmp_path).resume_schedule(change)
 
 
-def test_worker_self_cycle_opt_out_is_separate_from_enrollment(tmp_path: Path, monkeypatch) -> None:
+def test_worker_self_cycle_opt_out_is_separate_from_enrollment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("WORKTREE_MANAGER_AUTOMATIC_UPDATES_SELF_CYCLE", "0")
     worker = runtime.Worker(tmp_path)
     assert worker.snapshot["self_cycle_enabled"] is False

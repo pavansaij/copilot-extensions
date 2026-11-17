@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib
 import contextlib
 import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import Any, Iterator, cast
 from unittest.mock import Mock
 
 import pytest
@@ -73,9 +75,9 @@ def test_invalid_case_combination_refuses_before_preflight_or_preparation(
 def windows_case(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     selected: str, *, quiet: bool = True, lifetime: bool = True,
-) -> dict:
-    import windows_api
-    import windows_native
+) -> dict[str, Any]:
+    windows_api = importlib.import_module("windows_api")
+    windows_native = importlib.import_module("windows_native")
 
     class Observer:
         def __init__(self, _api: object) -> None:
@@ -87,23 +89,23 @@ def windows_case(
         def __exit__(self, *_args: object) -> None:
             pass
 
-        def packet(self) -> dict:
+        def packet(self) -> dict[str, bool]:
             return {"passed": quiet}
 
     monkeypatch.setattr(probe, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(windows_api, "WinAPI", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(windows_api, "WindowObserver", Observer)
     monkeypatch.setattr(windows_native, "observation_passed", Mock(return_value=lifetime))
-    return probe._qualify_cases(
+    return cast(dict[str, Any], probe._qualify_cases(
         tmp_path, tmp_path, {}, cycles=2 if selected == "handover" else 1,
         native_startup=True, instance_environment={}, case=selected,
-    )
+    ))
 
 
 def test_windows_failure_case_cannot_claim_two_cycle_job_qualification(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    import windows_native
+    windows_native = importlib.import_module("windows_native")
 
     report = windows_case(probe, monkeypatch, tmp_path, "failed-successor")
     assert "handover" not in report
@@ -118,7 +120,7 @@ def test_windows_failure_case_cannot_claim_two_cycle_job_qualification(
 def test_windows_handover_keeps_real_cadence_and_lifetime_assessment(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    import windows_native
+    windows_native = importlib.import_module("windows_native")
 
     report = windows_case(probe, monkeypatch, tmp_path, "handover")
     assert "failed_successor" not in report
@@ -139,7 +141,7 @@ def test_failed_native_observation_cannot_pass_selected_case(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     selected: str, quiet: bool, lifetime: bool,
 ) -> None:
-    import windows_api
+    windows_api = importlib.import_module("windows_api")
 
     with pytest.raises(windows_api.NativeBlocked, match="windows-observation-failed"):
         windows_case(probe, monkeypatch, tmp_path, selected, quiet=quiet, lifetime=lifetime)
@@ -169,7 +171,9 @@ def test_failed_case_preserves_primary_stack_and_report_availability(
 ) -> None:
     primary = KeyboardInterrupt("cancelled lifecycle") if fault == "cancel" else RuntimeError("primary lifecycle")
 
-    def failed(source: Path, root: Path, manager: dict, **kwargs: object) -> dict:
+    def failed(
+        source: Path, root: Path, manager: dict[str, Any], **kwargs: object,
+    ) -> dict[str, Any]:
         if fault in {"malformed", "retained"}:
             (root / "probe").mkdir(parents=True)
             (root / "probe/result.json").write_text(
@@ -201,9 +205,9 @@ def test_failed_case_preserves_primary_stack_and_report_availability(
 @pytest.mark.parametrize("error", [OSError("probe failure"), KeyboardInterrupt("cancelled")])
 def test_cli_failure_has_bounded_stack_without_creating_outputs(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    capsys: pytest.CaptureFixture, error: BaseException,
+    capsys: pytest.CaptureFixture[str], error: BaseException,
 ) -> None:
-    def failed(*args: object, **kwargs: object) -> dict:
+    def failed(*args: object, **kwargs: object) -> dict[str, Any]:
         raise error
 
     monkeypatch.setattr(probe, "qualify", failed)
@@ -223,10 +227,10 @@ def test_cli_failure_has_bounded_stack_without_creating_outputs(
 def test_case_finalization_attempts_all_pins_and_preserves_causal_failures(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
 ) -> None:
-    from identity import failure_details
+    failure_details = importlib.import_module("identity").failure_details
 
     (tmp_path / "probe").mkdir()
-    closed = []
+    closed: list[int] = []
 
     def close(index: int) -> None:
         closed.append(index)
@@ -239,7 +243,7 @@ def test_case_finalization_attempts_all_pins_and_preserves_causal_failures(
         if fault == "cancel":
             raise KeyboardInterrupt("cleanup cancelled")
 
-    result = {"passed": False, "cleanup_verified": False}
+    result: dict[str, Any] = {"passed": False, "cleanup_verified": False}
     if fault == "report":
         def no_report(*args: object, **kwargs: object) -> int:
             raise OSError("report write failed")
@@ -269,7 +273,7 @@ def test_case_finalization_attempts_all_pins_and_preserves_causal_failures(
 def test_polling_consumes_inherited_work_deadline(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, inherited: str,
 ) -> None:
-    import identity
+    identity = importlib.import_module("identity")
 
     now = [0.0]
     calls = []
@@ -307,7 +311,7 @@ def test_disposable_lifecycle_finalizer_cannot_leave_a_success_report(
     import agent_procutil.daemon_instances as instances
 
     @contextlib.contextmanager
-    def lifecycle(**kwargs: object):
+    def lifecycle(**kwargs: object) -> Iterator[dict[str, Any]]:
         yield {}
         raise RuntimeError("disposable lifecycle finalization failed")
 
