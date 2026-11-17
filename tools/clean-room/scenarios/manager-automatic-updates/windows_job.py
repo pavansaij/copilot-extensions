@@ -9,11 +9,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 sys.dont_write_bytecode = True
 
 
-def execute(spec: dict) -> dict:
+def execute(spec: dict[str, Any]) -> dict[str, Any]:
     root = Path(spec["root"])
     slot = root / "versions" / (root / "current-version").read_text(encoding="utf-8").strip()
     library = slot / "payload/libs/agent-procutil/src"

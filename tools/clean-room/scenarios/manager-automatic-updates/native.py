@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 
 class UnsupportedNative(RuntimeError):
@@ -34,7 +35,9 @@ def systemctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def registration(root: Path, *, instance_environment: dict[str, str] | None = None) -> dict:
+def registration(
+    root: Path, *, instance_environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     from agent_procutil._daemon_instance_store import _test_context
     from agent_procutil.daemon_instances import TEST_CONTEXT_ENV
 
@@ -47,7 +50,7 @@ def registration(root: Path, *, instance_environment: dict[str, str] | None = No
     with binding.open("x", encoding="utf-8") as stream:
         json.dump(instance_environment, stream)
     module = importlib.import_module("worktree_manager.automatic_updates_autostart")
-    result = module.register_autostart(root)
+    result: dict[str, Any] = module.register_autostart(root)
     if result.get("activation") == "blocked":
         raise RuntimeError(f"native registration blocked: {result.get('blockers')}")
     result = module.activate_autostart(root)
@@ -59,9 +62,10 @@ def registration(root: Path, *, instance_environment: dict[str, str] | None = No
 def unit_name(root: Path) -> str:
     module = importlib.import_module("worktree_manager.automatic_updates_autostart")
     status = module.inspect_autostart(root)
-    if not isinstance(status.get("unit"), str):
+    unit = status.get("unit")
+    if not isinstance(unit, str):
         raise RuntimeError(f"native fixture identity unavailable: {status.get('blockers')}")
-    return status["unit"]
+    return unit
 
 
 def fields(unit: str) -> dict[str, str]:
@@ -74,7 +78,7 @@ def fields(unit: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
 
-def assert_mainpid(unit: str, status: dict, root: Path) -> dict[str, str]:
+def assert_mainpid(unit: str, status: dict[str, Any], root: Path) -> dict[str, str]:
     values = fields(unit)
     if int(values.get("MainPID", "0")) != status["pid"]:
         raise AssertionError("native MainPID is not the health-verified Python worker")

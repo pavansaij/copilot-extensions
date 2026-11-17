@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from io import BufferedWriter
 from typing import Any
 
 from identity import ProcessPin, until
@@ -44,7 +45,7 @@ class StartupSession:
         self.job = None
         self.caller = None
         self.control: ProcessPin | None = None
-        self.output = None
+        self.output: BufferedWriter | None = None
         self.launch_attempted = False
         self.readiness_verified = False
         self.result: dict[str, Any] = {}
@@ -123,7 +124,7 @@ class StartupSession:
         if self.control is None or self.control.exited():
             raise NativeBlocked("control-not-live", "contained control exited before Job closure")
 
-    def verify_job_close(self, status: dict, process: Any) -> dict:
+    def verify_job_close(self, status: dict[str, Any], process: Any) -> dict[str, Any]:
         self.observer.add_pid(status["pid"])
         self.readiness_verified = True
         if self.job is None or self.control is None:
@@ -180,7 +181,7 @@ class StartupSession:
             )
 
 
-def observation_passed(packet: dict, handover: dict) -> bool:
+def observation_passed(packet: dict[str, Any], handover: dict[str, Any]) -> bool:
     lifetime = handover.get("windows_job_lifetime", {})
     return bool(
         packet.get("passed") is True and handover.get("observed_cycles", 0) >= 2

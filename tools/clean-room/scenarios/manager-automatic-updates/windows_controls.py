@@ -6,13 +6,14 @@ import ctypes as ct
 from ctypes import wintypes as wt
 import json
 from pathlib import Path
+from typing import Any
 
 import fixtures
 from identity import failure_details, until
 from windows_api import NativeBlocked, WinAPI, WindowObserver, require_desktop
 
 
-def sensitivity(packet: dict, hwnd: int, original: int) -> bool:
+def sensitivity(packet: dict[str, Any], hwnd: int, original: int) -> bool:
     raw = packet.get("raw_events", [])
     activation = next((
         index for index, event in enumerate(raw)
@@ -31,7 +32,7 @@ def sensitivity(packet: dict, hwnd: int, original: int) -> bool:
     )
 
 
-def restore_focus(api: WinAPI, original: int, report: dict) -> None:
+def restore_focus(api: WinAPI, original: int, report: dict[str, Any]) -> None:
     report["focus_restoration_attempted"] = True
     accepted = bool(api.user.SetForegroundWindow(original))
     report["focus_restoration_api_accepted"] = accepted
@@ -47,7 +48,7 @@ def restore_focus(api: WinAPI, original: int, report: dict) -> None:
     report["focus_restoration_observed"] = True
 
 
-def run_controls(workdir: Path, *, allow_visible_controls: bool) -> dict:
+def run_controls(workdir: Path, *, allow_visible_controls: bool) -> dict[str, Any]:
     if not allow_visible_controls:
         raise NativeBlocked(
             "visible-control-consent-required",
@@ -55,7 +56,7 @@ def run_controls(workdir: Path, *, allow_visible_controls: bool) -> dict:
         )
     api = None
     observer = None
-    report = {
+    report: dict[str, Any] = {
         "schema": 1, "passed": False, "kind": "native-observer-positive-controls",
         "zero_window_qualification": False, "cleanup_verified": False,
         "original_foreground": None, "final_foreground": None,

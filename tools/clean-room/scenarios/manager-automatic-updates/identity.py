@@ -10,12 +10,12 @@ from pathlib import Path
 import signal
 import sys
 import time
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar, cast
 
 T = TypeVar("T")
 
 
-def failure_details(error: BaseException) -> dict:
+def failure_details(error: BaseException) -> dict[str, Any]:
     """Keep bounded causal stacks without locals or source-file inspection."""
     messages = []
     seen = set()
@@ -105,7 +105,7 @@ class ProcessPin:
                 not isinstance(expected_birth, str) or not expected_birth.startswith("windows:")
             ):
                 raise RuntimeError("control pin requires its original creation identity")
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
             kernel.OpenProcess.restype = ctypes.c_void_p
             kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
             kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
@@ -115,7 +115,7 @@ class ProcessPin:
             access = 0x100000 | 0x1000 | (0x1 if terminate_control else 0)
             self.handle = kernel.OpenProcess(access, False, pid)
             if not self.handle:
-                raise OSError(ctypes.get_last_error(), "cannot pin fixture worker process")
+                raise OSError(getattr(ctypes, "get_last_error")(), "cannot pin fixture worker process")
             if expected_birth is not None:
                 from agent_procutil._daemon_instance_identity import _windows_birth
 
@@ -151,8 +151,8 @@ class ProcessPin:
         if self.handle is not None:
             result = self.kernel.WaitForSingleObject(self.handle, 0)
             if result not in (0, 258):
-                raise OSError(ctypes.get_last_error(), "cannot observe pinned fixture process")
-            return result == 0
+                raise OSError(getattr(ctypes, "get_last_error")(), "cannot observe pinned fixture process")
+            return bool(result == 0)
         raise RuntimeError("process pin is closed")
 
     def close(self) -> None:
@@ -161,7 +161,7 @@ class ProcessPin:
             self.fd = None
         if self.handle is not None:
             if not self.kernel.CloseHandle(self.handle):
-                raise OSError(ctypes.get_last_error(), "cannot close fixture process pin")
+                raise OSError(getattr(ctypes, "get_last_error")(), "cannot close fixture process pin")
             self.handle = None
 
     def request_term(self) -> None:
@@ -175,13 +175,13 @@ class ProcessPin:
         if not self.terminate_control or not self.identity_verified or self.handle is None:
             raise RuntimeError("force cleanup is restricted to the pinned fixture sleep control")
         if not self.exited() and not self.kernel.TerminateProcess(self.handle, 1):
-            raise OSError(ctypes.get_last_error(), "pinned fixture control cleanup failed")
+            raise OSError(getattr(ctypes, "get_last_error")(), "pinned fixture control cleanup failed")
 
 
-def read_event(path: Path) -> dict:
+def read_event(path: Path) -> dict[str, Any]:
     import json
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         return {}

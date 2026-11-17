@@ -6,11 +6,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Protocol, cast
 
 import fixtures
 from identity import ProcessPin, failure_details, read_event, until
 import native
+
+
+class ProcessHandle(Protocol):
+    def wait(self, timeout: float | None = None) -> int: ...
 
 
 def held(root: Path, kind: str) -> bool:
@@ -25,7 +29,9 @@ def held(root: Path, kind: str) -> bool:
     return False
 
 
-def ready(process: Any, root: Path, *, version: str | None = None, timeout: float = 35) -> dict:
+def ready(
+    process: Any, root: Path, *, version: str | None = None, timeout: float = 35,
+) -> dict[str, Any]:
     return until(
         lambda: process.worker_status(root),
         lambda status: status.get("running") is True and (
@@ -35,14 +41,14 @@ def ready(process: Any, root: Path, *, version: str | None = None, timeout: floa
     )
 
 
-def summarize(status: dict) -> dict:
+def summarize(status: dict[str, Any]) -> dict[str, Any]:
     return {
         key: status[key] for key in ("worker_id", "pid", "state", "last_exit_code", "next_due")
         if key in status
     }
 
 
-def pin_worker(root: Path, status: dict, pins: list[ProcessPin], observer: Any = None) -> None:
+def pin_worker(root: Path, status: dict[str, Any], pins: list[ProcessPin], observer: Any = None) -> None:
     birth = status.get("birth")
     if not isinstance(birth, str) or not birth:
         raise RuntimeError("worker health omitted its original kernel birth identity")
@@ -92,27 +98,27 @@ def worker_command_matches(root: Path, slot: Path, command: tuple[str, ...]) -> 
     return False
 
 
-def launcher(root: Path, env: dict[str, str]) -> subprocess.Popen:
+def launcher(root: Path, env: dict[str, str]) -> ProcessHandle:
     from agent_procutil.daemon_instances import DaemonInstanceSpec, spawn_instance
 
     output = (root / "probe" / "launcher.log").open("ab")
     try:
-        return spawn_instance(
+        return cast(ProcessHandle, spawn_instance(
             fixtures.command(root, ["automatic-updates", "run", "--root", str(root)]),
             instance=DaemonInstanceSpec(
                 "worktree-manager-automatic-updates", root, Path(__file__).resolve(),
             ),
             cwd=root, env=env, stdin=subprocess.DEVNULL,
             stdout=output, stderr=subprocess.STDOUT,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
-        )
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW")} if os.name == "nt" else {}),
+        ))
     finally:
         output.close()
 
 
 def cleanup(
     root: Path, manager: dict[str, Any], env: dict[str, str],
-    pins: list[ProcessPin], handles: list[subprocess.Popen], unit: str | None,
+    pins: list[ProcessPin], handles: list[ProcessHandle], unit: str | None,
 ) -> None:
     (root / "probe" / "release").touch()
     # The public guard may be held by the finite command; release it before disable.
@@ -131,7 +137,7 @@ def cleanup(
         native.retire(root, unit)
 
 
-def finish_case(root: Path, result: dict, pins: list[ProcessPin], finalize: Any) -> None:
+def finish_case(root: Path, result: dict[str, Any], pins: list[ProcessPin], finalize: Any) -> None:
     failures = []
     try:
         finalize()
@@ -169,14 +175,14 @@ def case(
     failing_standby: bool = False, native_startup: bool = False,
     windows_observer: Any = None,
     instance_environment: dict[str, str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     metadata = fixtures.build(source, root, manager, failing_standby=failing_standby)
     env = fixtures.environment(root, native=native_startup and os.name != "nt")
     env.update(instance_environment or {})
     fixtures.warm(root, env)
     process = manager["automatic_updates_process"]
     pins: list[ProcessPin] = []
-    handles: list[subprocess.Popen] = []
+    handles: list[ProcessHandle] = []
     unit = None
     windows_session = None
     result: dict[str, Any] = {
@@ -240,7 +246,7 @@ def case(
                 "--detach", "--json",
             ]),
             env=env, cwd=root, capture_output=True, text=True, timeout=20, check=False,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW")} if os.name == "nt" else {}),
         )
         if conflict.returncode:
             raise AssertionError(f"concurrent canonical request failed: {conflict.stderr}")
@@ -290,6 +296,7 @@ def case(
             if not held(root, "worker-lease"):
                 raise AssertionError("failed successor lost scheduling custody")
             if unit:
+                assert native_before is not None
                 native_after = native.assert_mainpid(unit, retained, root)
                 if native_after["NRestarts"] != native_before["NRestarts"]:
                     raise AssertionError("failed native successor retired its healthy predecessor")
@@ -306,6 +313,7 @@ def case(
             result["new"] = summarize(successor)
             result["old_process_exit_verified"] = True
             if unit:
+                assert native_before is not None
                 native_after = native.assert_mainpid(unit, successor, root)
                 if int(native_after["NRestarts"]) <= int(native_before["NRestarts"]):
                     raise AssertionError("native worker did not restart through its failure sentinel")
@@ -361,7 +369,7 @@ def case(
 def signal_drain_case(
     source: Path, root: Path, manager: dict[str, Any], *,
     instance_environment: dict[str, str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     fixtures.build(source, root, manager)
     env = fixtures.environment(root, native=True)
     env.update(instance_environment or {})

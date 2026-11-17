@@ -5,7 +5,7 @@ from __future__ import annotations
 import ctypes as ct
 from ctypes import wintypes as wt
 import threading
-from typing import Callable
+from typing import Any, Callable
 
 from windows_observation import NativeBlocked
 
@@ -15,14 +15,15 @@ EventCallback = getattr(ct, "WINFUNCTYPE", ct.CFUNCTYPE)(
 
 
 class WinEventHooks:
-    def __init__(self, user: object, kernel: object, receive: Callable,
+    def __init__(self, user: ct.CDLL, kernel: ct.CDLL,
+                 receive: Callable[[int, int, int, int, int, int, int], None],
                  on_error: Callable[[BaseException], None]) -> None:
         self.user, self.kernel, self.receive, self.on_error = user, kernel, receive, on_error
         self.owner = threading.get_ident()
         self.handles: list[int] = []
         self.count = 0
         self.callback = EventCallback(self._receive)
-        signatures = (
+        signatures: tuple[tuple[Any, list[Any], Any], ...] = (
             (user.SetWinEventHook, [wt.DWORD, wt.DWORD, wt.HMODULE,
                                    EventCallback, wt.DWORD, wt.DWORD, wt.DWORD], wt.HANDLE),
             (user.UnhookWinEvent, [wt.HANDLE], wt.BOOL),
@@ -52,7 +53,7 @@ class WinEventHooks:
             # OUTOFCONTEXT is zero. Do not skip this process or this thread.
             handle = self.user.SetWinEventHook(first, last, None, self.callback, 0, 0, 0)
             if not handle:
-                raise NativeBlocked("event-hook-failed", f"SetWinEventHook: WinError {ct.get_last_error()}")
+                raise NativeBlocked("event-hook-failed", f"SetWinEventHook: WinError {getattr(ct, "get_last_error")()}")
             self.handles.append(handle)
         self.count = len(self.handles)
 
@@ -79,7 +80,7 @@ class WinEventHooks:
             try:
                 if not self.user.UnhookWinEvent(handle):
                     raise NativeBlocked(
-                        "event-unhook-failed", f"UnhookWinEvent: WinError {ct.get_last_error()}",
+                        "event-unhook-failed", f"UnhookWinEvent: WinError {getattr(ct, "get_last_error")()}",
                     )
                 self.handles.remove(handle)
             except BaseException as exc:

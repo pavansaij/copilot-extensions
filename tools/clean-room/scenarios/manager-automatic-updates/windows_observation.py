@@ -7,7 +7,7 @@ from copy import deepcopy
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from native import UnsupportedNative
 from identity import failure_details, until
@@ -44,10 +44,10 @@ class WindowObserver:
         self.foreground = api.foreground()
         if not self.foreground:
             raise NativeBlocked("foreground-unavailable", "no foreground window at observation start")
-        self.foreground_identity = api.window_identity(self.foreground)
+        self.foreground_identity: tuple[int, int] | None = api.window_identity(self.foreground)
         self.roots = {api.process(os.getpid()).key}
-        self.events: list[dict] = []
-        self.trace: deque[dict] = deque(maxlen=128)
+        self.events: list[dict[str, Any]] = []
+        self.trace: deque[dict[str, Any]] = deque(maxlen=128)
         self.samples = 0
         self.max_gap = 0.0
         self.started = time.monotonic()
@@ -67,9 +67,9 @@ class WindowObserver:
         self.ready = threading.Event()
         self.lock = threading.RLock()
         self.thread = threading.Thread(target=self._run, daemon=True)
-        self._packet: dict | None = None
+        self._packet: dict[str, Any] | None = None
         self._visible_seen: set[tuple[int, int, int]] = set()
-        self._pending_neighbors: list[dict] = []
+        self._pending_neighbors: list[dict[str, Any]] = []
 
     def add_pid(self, pid: int) -> None:
         info = self.api.process(pid)
@@ -154,7 +154,7 @@ class WindowObserver:
         with self.lock:
             if self.ended is not None:
                 raise NativeBlocked("observer-sealed", "cannot sample a completed observation")
-            sample: dict = {"index": self.samples, "started": time.monotonic()}
+            sample: dict[str, Any] = {"index": self.samples, "started": time.monotonic()}
             start = time.monotonic()
             foreground, identity = None, None
             try:
@@ -272,7 +272,7 @@ class WindowObserver:
             with self.lock:
                 self.sealed = True
 
-    def _violation(self, event: dict) -> dict:
+    def _violation(self, event: dict[str, Any]) -> dict[str, Any]:
         result = {**event, "pid": None, "image": None, "attribution": "ambiguous-desktop"}
         identity = event.get("identity")
         if identity:
@@ -290,7 +290,7 @@ class WindowObserver:
                 result["identity_error"] = self._failed("attribution", exc)
         return result
 
-    def packet(self) -> dict:
+    def packet(self) -> dict[str, Any]:
         with self.lock:
             if self._packet is not None:
                 return deepcopy(self._packet)

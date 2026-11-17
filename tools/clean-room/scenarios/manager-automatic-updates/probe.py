@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Callable
+from typing import Any, Callable
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,9 +27,9 @@ CASES = ("all", "handover", "failed-successor", "signal-drain")
 
 
 def run_selected(
-    report: dict, key: str, root: Path, function: Callable[..., dict],
-    source: Path, manager: dict, **kwargs: object,
-) -> dict:
+    report: dict[str, Any], key: str, root: Path, function: Callable[..., dict[str, Any]],
+    source: Path, manager: dict[str, Any], **kwargs: object,
+) -> dict[str, Any]:
     report["active_case"] = key
     states = report.setdefault("case_results", {})
     states[key] = {"status": "running"}
@@ -72,7 +72,7 @@ def run_selected(
 def qualify(
     source: Path, workdir: Path, *, cycles: int, native_startup: bool,
     case: str = "all",
-) -> dict:
+) -> dict[str, Any]:
     if case not in CASES:
         raise ValueError("select a declared qualification case")
     if cycles not in (1, 2):
@@ -121,12 +121,12 @@ def qualify(
 
 
 def _qualify_cases(
-    source: Path, workdir: Path, manager: dict, *, cycles: int, native_startup: bool,
+    source: Path, workdir: Path, manager: dict[str, Any], *, cycles: int, native_startup: bool,
     instance_environment: dict[str, str], case: str = "all",
-) -> dict:
+) -> dict[str, Any]:
     started = time.monotonic()
     windows_native = native_startup and sys.platform == "win32"
-    report = {
+    report: dict[str, Any] = {
         "schema": 1, "passed": False, "cycle_kind": "finite-guarded-command-fixture",
         "requested_case": case, "complete_case_set": case == "all",
         "requires_process_boundary": True,

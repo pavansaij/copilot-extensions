@@ -8,9 +8,9 @@ from dataclasses import asdict, dataclass
 import os
 from pathlib import Path, PureWindowsPath
 import threading
-from typing import Callable
+from typing import Any, Callable
 
-from windows_observation import HookPump, NativeBlocked, WindowObserver  # noqa: F401
+from windows_observation import HookPump, NativeBlocked as NativeBlocked, WindowObserver as WindowObserver
 
 CONSOLE_IMAGES = {
     "python.exe", "pythonw.exe", "uv.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
@@ -58,8 +58,8 @@ def create_private_directory(path: Path) -> None:
     """Create only the new fixture root, with a protected inheritable user DACL."""
     if os.name != "nt":
         raise NativeBlocked("win32-unavailable", "Windows private directory API unavailable")
-    kernel = ct.WinDLL("kernel32", use_last_error=True)
-    advapi = ct.WinDLL("advapi32", use_last_error=True)
+    kernel = getattr(ct, "WinDLL")("kernel32", use_last_error=True)
+    advapi = getattr(ct, "WinDLL")("advapi32", use_last_error=True)
     kernel.GetCurrentProcess.restype = wt.HANDLE
     kernel.GetVolumePathNameW.argtypes = [wt.LPCWSTR, wt.LPWSTR, wt.DWORD]
     kernel.GetVolumeInformationW.argtypes = [
@@ -68,9 +68,9 @@ def create_private_directory(path: Path) -> None:
     ]
     volume, flags = ct.create_unicode_buffer(32768), wt.DWORD()
     if not kernel.GetVolumePathNameW(str(path.parent), volume, len(volume)):
-        raise ct.WinError(ct.get_last_error())
+        raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
     if not kernel.GetVolumeInformationW(volume, None, 0, None, None, ct.byref(flags), None, 0):
-        raise ct.WinError(ct.get_last_error())
+        raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
     if not flags.value & 0x8:
         raise NativeBlocked("private-acl-unsupported", "fixture volume does not preserve Windows ACLs")
     kernel.CloseHandle.argtypes = [wt.HANDLE]
@@ -90,33 +90,33 @@ def create_private_directory(path: Path) -> None:
     kernel.CreateDirectoryW.argtypes = [wt.LPCWSTR, ct.POINTER(Attributes)]
     token, sid_text, descriptor = wt.HANDLE(), wt.LPWSTR(), wt.LPVOID()
     if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, ct.byref(token)):
-        raise ct.WinError(ct.get_last_error())
+        raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
     try:
         required = wt.DWORD()
         advapi.GetTokenInformation(token, 1, None, 0, ct.byref(required))
         if not required.value:
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
         user = ct.create_string_buffer(required.value)
         if not advapi.GetTokenInformation(token, 1, user, len(user), ct.byref(required)):
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
         sid = ct.cast(user, ct.POINTER(wt.LPVOID)).contents
         if not advapi.ConvertSidToStringSidW(sid, ct.byref(sid_text)):
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
         sddl = f"D:P(A;OICI;FA;;;{sid_text.value})(A;OICI;FA;;;BA)"
         if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ct.byref(descriptor), None,
         ):
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
         attributes = Attributes(ct.sizeof(Attributes), descriptor, False)
         if not kernel.CreateDirectoryW(str(path), ct.byref(attributes)):
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
     finally:
         if descriptor:
             kernel.LocalFree(descriptor)
         if sid_text:
             kernel.LocalFree(ct.cast(sid_text, wt.LPVOID))
         if not kernel.CloseHandle(token):
-            raise ct.WinError(ct.get_last_error())
+            raise getattr(ct, "WinError")(getattr(ct, "get_last_error")())
 
 
 @dataclass(frozen=True)
@@ -149,10 +149,12 @@ class WinAPI:
     def __init__(self) -> None:
         if os.name != "nt":
             raise NativeBlocked("win32-unavailable", "native Windows APIs are unavailable")
-        self.kernel = ct.WinDLL("kernel32", use_last_error=True)
-        self.user = ct.WinDLL("user32", use_last_error=True)
-        self.advapi = ct.WinDLL("advapi32", use_last_error=True)
-        self.callback = ct.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        self.kernel = getattr(ct, "WinDLL")("kernel32", use_last_error=True)
+        self.user = getattr(ct, "WinDLL")("user32", use_last_error=True)
+        self.advapi = getattr(ct, "WinDLL")("advapi32", use_last_error=True)
+        self.callback: Callable[[Callable[[int, int], bool]], object] = getattr(ct, "WINFUNCTYPE")(
+            wt.BOOL, wt.HWND, wt.LPARAM,
+        )
         self.handles: dict[int, int] = {}
         self.cleanup_failures: list[BaseException] = []
         self.infos: dict[int, ProcessInfo] = {}
@@ -165,7 +167,7 @@ class WinAPI:
 
     def _configure(self) -> None:
         k, u, a = self.kernel, self.user, self.advapi
-        signatures = (
+        signatures: tuple[tuple[Any, list[Any], Any], ...] = (
             (k.OpenProcess, [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE),
             (k.CloseHandle, [wt.HANDLE], wt.BOOL),
             (k.GetCurrentProcess, [], wt.HANDLE),
@@ -196,9 +198,9 @@ class WinAPI:
 
     def _check(self, value: object, action: str) -> None:
         if not value:
-            raise NativeBlocked("win32-inspection-failed", f"{action}: WinError {ct.get_last_error()}")
+            raise NativeBlocked("win32-inspection-failed", f"{action}: WinError {getattr(ct, "get_last_error")()}")
 
-    def _close_inspection(self, handle: int, action: str) -> None:
+    def _close_inspection(self, handle: int | ct.c_void_p, action: str) -> None:
         try:
             self._check(self.kernel.CloseHandle(handle), action)
         except BaseException as exc:
@@ -284,12 +286,12 @@ class WinAPI:
             entry.dwSize = ct.sizeof(entry)
             parents = {}
             available = first(handle, ct.byref(entry))
-            if not available and ct.get_last_error() != 18:
+            if not available and getattr(ct, "get_last_error")() != 18:
                 raise NativeBlocked("process-snapshot-failed", "Process32FirstW failed")
             while available:
                 parents[int(entry.pid)] = int(entry.parent)
                 available = next_entry(handle, ct.byref(entry))
-            if ct.get_last_error() != 18:
+            if getattr(ct, "get_last_error")() != 18:
                 raise NativeBlocked("process-snapshot-failed", "Process32NextW failed")
             self.parents = parents
         finally:
@@ -345,7 +347,7 @@ class WinAPI:
 
     def windows(self) -> dict[int, WindowInfo]:
         result = {}
-        failure = []
+        failure: list[BaseException] = []
 
         @self.callback
         def visit(hwnd: int, _data: int) -> bool:
@@ -381,7 +383,8 @@ class WinAPI:
         return int(pid.value), int(thread)
 
     def raw_windows(self) -> dict[int, tuple[int, int]]:
-        result, failure = {}, []
+        result: dict[int, tuple[int, int]] = {}
+        failure: list[BaseException] = []
 
         @self.callback
         def visit(hwnd: int, _data: int) -> bool:
@@ -405,7 +408,10 @@ class WinAPI:
     def require_desktop(self) -> None:
         require_desktop(self.facts())
 
-    def event_hooks(self, receive: Callable, on_error: Callable[[BaseException], None]) -> HookPump:
+    def event_hooks(
+        self, receive: Callable[[int, int, int, int, int, int, int], None],
+        on_error: Callable[[BaseException], None],
+    ) -> HookPump:
         from windows_events import WinEventHooks
         return WinEventHooks(self.user, self.kernel, receive, on_error)
 

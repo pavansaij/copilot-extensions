@@ -39,7 +39,7 @@ def private_directory(path: Path) -> Path:
     info = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
         raise ValueError("qualification scratch must be an ordinary directory")
-    if os.name != "nt" and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
+    if os.name != "nt" and (info.st_uid != getattr(os, "getuid")() or stat.S_IMODE(info.st_mode) & 0o077):
         raise ValueError("qualification scratch must be owned by the caller and private")
     return path.resolve(strict=True)
 
@@ -60,7 +60,9 @@ def load_manager(source: Path) -> dict[str, Any]:
     for path in reversed(paths):
         sys.path.insert(0, str(path))
     existing = sys.modules.get("worktree_manager")
-    if existing is not None and Path(existing.__file__).resolve().parent != payload / "src/worktree_manager":
+    if existing is not None and (
+        existing.__file__ is None or Path(existing.__file__).resolve().parent != payload / "src/worktree_manager"
+    ):
         raise RuntimeError("qualification needs a fresh interpreter for this candidate source")
     return {
         name: importlib.import_module(f"worktree_manager.{name}")
@@ -140,7 +142,7 @@ def environment(root: Path, *, native: bool = False) -> dict[str, str]:
             raise RuntimeError("canonical uv is unavailable")
         cache = subprocess.run(
             [uv, "cache", "dir"], capture_output=True, text=True, timeout=15, check=True,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW")} if os.name == "nt" else {}),
         ).stdout.strip()
         env["UV_CACHE_DIR"] = cache
     home = root / "home"
@@ -283,7 +285,7 @@ def warm(root: Path, env: dict[str, str]) -> None:
         completed = subprocess.run(
             command(root, ["--version"], version=version),
             cwd=root, env=env, capture_output=True, text=True, timeout=150, check=False,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW")} if os.name == "nt" else {}),
         )
         if completed.returncode:
             raise RuntimeError(f"canonical fixture preparation failed: {completed.stderr[-4000:]}")
