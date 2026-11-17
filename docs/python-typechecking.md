@@ -40,6 +40,10 @@ Import resolution prefers the checked project's inventoried `src` roots over
 other projects' bundled package copies, including during test-only checks.
 This keeps a standalone source edit from being checked against an older
 consumer copy without suppressing diagnostics or admitting additional files.
+The Worktrees runtime-admission engine copy has its own pending physical
+scope, separate from the plugin's same-named standalone scripts. Both copies
+remain in the changed-code ratchet; the constructor retains its Python 3.11
+target while its surrounding helpers retain Python 3.10.
 
 Bridge remains pending as a project. Its whole-file changed-code checks use
 a hash-locked extension of the service-index checker environment, adding

@@ -638,7 +638,12 @@
       ],
       "import_roots": [
         "worktree-manager/tests",
-        "plugins/agent-worktrees/tests"
+        "plugins/agent-worktrees/tests",
+        "plugins/agent-worktrees/scripts/_runtime_admission/tools"
+      ],
+      "exclude": [
+        "plugins/agent-worktrees/scripts/installer_engine.py",
+        "plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine"
       ],
       "program_roots": [
         {
@@ -658,8 +663,28 @@
           ]
         }
       ],
-      "exclude": ["plugins/agent-worktrees/scripts/installer_engine.py"],
       "level": "pending"
+    },
+    {
+      "name": "agent-worktrees-admission-engine",
+      "include": ["plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine"],
+      "import_roots": [
+        "plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine",
+        "plugins/agent-worktrees/scripts/_runtime_admission/libs/versioned-runtime"
+      ],
+      "exclude": ["plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine/installer_engine.py"],
+      "level": "pending"
+    },
+    {
+      "name": "agent-worktrees-admission-engine-core",
+      "include": ["plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine/installer_engine.py"],
+      "import_roots": [
+        "plugins/agent-worktrees/scripts/_runtime_admission/libs/installer-engine",
+        "plugins/agent-worktrees/scripts/_runtime_admission/libs/versioned-runtime"
+      ],
+      "exclude": [],
+      "level": "pending",
+      "python_version": "3.11"
     },
     {
       "name": "agent-worktrees-installer",
