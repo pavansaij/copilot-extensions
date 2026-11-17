@@ -13,7 +13,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any, Callable, NoReturn, TextIO
 from unittest.mock import Mock
 
 import pytest
@@ -62,22 +63,22 @@ assert "prepared.json" in actual
         [sys.executable, "-B", "-c", script, str(scenario), str(repository),
          str(tmp_path / "observed")],
         capture_output=True, text=True, timeout=45, check=False,
-        **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW")} if os.name == "nt" else {}),
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.fixture
-def windows_probe(monkeypatch: pytest.MonkeyPatch) -> tuple:
+def windows_probe(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleType]:
     scenario = Path(__file__).resolve().parents[2] / "tools/clean-room/scenarios/manager-automatic-updates"
     monkeypatch.syspath_prepend(str(scenario))
     api = importlib.import_module("windows_api")
     adapter = importlib.import_module("windows_native")
-    assert Path(api.__file__).parent == scenario
+    assert api.__file__ is not None and Path(api.__file__).parent == scenario
     return api, adapter
 
 
-def desktop_facts(module) -> object:
+def desktop_facts(module: ModuleType) -> Any:
     return module.DesktopFacts(
         elevated=False, shell_present=True, foreground_visible=True, station_visible=True,
         input_desktop_matches=True, same_session=True, ssh=False,
@@ -94,7 +95,7 @@ def desktop_facts(module) -> object:
     ("same_session", False, "desktop-session-mismatch"),
 ])
 def test_windows_preflight_blocks_before_registry_write(
-    windows_probe: tuple, tmp_path: Path, field: str, value: bool, code: str,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, field: str, value: bool, code: str,
 ) -> None:
     api_module, adapter = windows_probe
     facts = replace(desktop_facts(api_module), **{field: value})
@@ -110,7 +111,7 @@ def test_windows_preflight_blocks_before_registry_write(
     assert not (tmp_path / "probe/job-spec.json").exists()
 
 
-def test_windows_valid_desktop_preflight_is_read_only(windows_probe: tuple) -> None:
+def test_windows_valid_desktop_preflight_is_read_only(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, adapter = windows_probe
     api = SimpleNamespace(facts=lambda: desktop_facts(module))
     result = adapter.preflight(api)
@@ -118,7 +119,7 @@ def test_windows_valid_desktop_preflight_is_read_only(windows_probe: tuple) -> N
 
 
 def test_windows_missing_inspection_api_blocks_before_registry(
-    windows_probe: tuple, tmp_path: Path,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path,
 ) -> None:
     module, adapter = windows_probe
     api = SimpleNamespace(
@@ -134,14 +135,14 @@ def test_windows_missing_inspection_api_blocks_before_registry(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux-compatible import/API-unavailability contract")
-def test_windows_adapter_imports_without_win32_side_effects(windows_probe: tuple) -> None:
+def test_windows_adapter_imports_without_win32_side_effects(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, adapter = windows_probe
     with pytest.raises(module.NativeBlocked, match="win32-unavailable"):
         adapter.preflight()
 
 
 class DesktopStub:
-    def __init__(self, module) -> None:
+    def __init__(self, module: ModuleType) -> None:
         self.module = module
         self.root = module.ProcessInfo(os.getpid(), 1, 0, "python.exe", 1)
         self.records = {self.root.pid: self.root}
@@ -153,7 +154,7 @@ class DesktopStub:
     def refresh_processes(self) -> None:
         pass
 
-    def windows(self) -> dict:
+    def windows(self) -> dict[int, Any]:
         return dict(self.visible)
 
     def foreground(self) -> int:
@@ -162,15 +163,15 @@ class DesktopStub:
     def window_identity(self, hwnd: int) -> tuple[int, int]:
         return self.visible[hwnd].process.pid, 42
 
-    def raw_windows(self) -> dict:
+    def raw_windows(self) -> dict[int, tuple[int, int]]:
         return {hwnd: self.window_identity(hwnd) for hwnd in self.visible}
 
-    def process(self, pid: int) -> object:
+    def process(self, pid: int) -> Any:
         if pid in self.records:
             return self.records[pid]
         return next(window.process for window in self.visible.values() if window.process.pid == pid)
 
-    def lineage(self, pid: int) -> tuple:
+    def lineage(self, pid: int) -> tuple[tuple[int, int], ...]:
         return next(window.lineage for window in self.visible.values() if window.process.pid == pid)
 
     def session(self, pid: int) -> int:
@@ -179,17 +180,19 @@ class DesktopStub:
     def elevated(self, handle: int) -> bool:
         return False
 
-    def facts(self) -> object:
+    def facts(self) -> Any:
         return desktop_facts(self.module)
 
     def require_desktop(self) -> None:
         self.module.require_desktop(self.facts())
 
-    def event_hooks(self, receive, on_error) -> object:
+    def event_hooks(
+        self, receive: Callable[..., None], on_error: Callable[[BaseException], None],
+    ) -> SimpleNamespace:
         return SimpleNamespace(count=2, start=lambda: None, drain=lambda: None, close=lambda: None)
 
 
-def test_windows_baseline_console_is_not_a_new_fixture_window(windows_probe: tuple) -> None:
+def test_windows_baseline_console_is_not_a_new_fixture_window(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
@@ -197,7 +200,7 @@ def test_windows_baseline_console_is_not_a_new_fixture_window(windows_probe: tup
     assert observer.packet()["violations"] == []
 
 
-def test_get_foreground_window_null_does_not_read_stale_last_error(windows_probe: tuple) -> None:
+def test_get_foreground_window_null_does_not_read_stale_last_error(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = module.WinAPI.__new__(module.WinAPI)
     api.user = SimpleNamespace(GetForegroundWindow=lambda: None)
@@ -207,14 +210,14 @@ def test_get_foreground_window_null_does_not_read_stale_last_error(windows_probe
 
 
 def test_concurrent_process_snapshots_retain_one_ctypes_signature(
-    windows_probe: tuple, monkeypatch: pytest.MonkeyPatch,
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     module, _ = windows_probe
     signature = [module.wt.HANDLE, module.ct.POINTER(module.ProcessEntry)]
 
-    def first(_handle, pointer):
+    def first(_handle: object, pointer: Any) -> bool:
         assert isinstance(pointer._obj, module.ProcessEntry)
         return False
 
@@ -235,7 +238,7 @@ def test_concurrent_process_snapshots_retain_one_ctypes_signature(
 
 
 def test_native_case_retains_ctypes_startup_error_when_cleanup_also_fails(
-    windows_probe: tuple, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     api_module, adapter = windows_probe
     lifecycle = importlib.import_module("lifecycle")
@@ -250,16 +253,16 @@ def test_native_case_retains_ctypes_startup_error_when_cleanup_also_fails(
     monkeypatch.setattr(lifecycle, "os", SimpleNamespace(name="nt"))
 
     class Session:
-        def __init__(self, *args):
+        def __init__(self, *args: Any) -> None:
             pass
 
-        def start(self):
+        def start(self) -> NoReturn:
             raise api_module.ct.ArgumentError("controlled pointer signature conflict")
 
-        def close_job(self):
+        def close_job(self) -> None:
             pass
 
-        def retire(self):
+        def retire(self) -> NoReturn:
             raise api_module.NativeBlocked("unattested-startup-cleanup", "controlled cleanup hold")
 
     monkeypatch.setattr(adapter, "StartupSession", Session)
@@ -277,7 +280,7 @@ def test_native_case_retains_ctypes_startup_error_when_cleanup_also_fails(
 @pytest.mark.skipif(os.name == "nt", reason="POSIX immutable worker command identity")
 @pytest.mark.parametrize("leased", [False, True])
 def test_worker_identity_accepts_only_retained_invocation_and_canonical_lease_shim(
-    windows_probe: tuple, tmp_path: Path, leased: bool,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, leased: bool,
 ) -> None:
     from agent_procutil._daemon_instance_child import leased_python_command
 
@@ -302,7 +305,7 @@ def test_worker_identity_accepts_only_retained_invocation_and_canonical_lease_sh
         assert not lifecycle.worker_command_matches(tmp_path, slot, tuple(command))
 
 
-def test_initial_null_foreground_does_not_create_a_passing_observer(windows_probe: tuple) -> None:
+def test_initial_null_foreground_does_not_create_a_passing_observer(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     api.front = 0
@@ -310,7 +313,7 @@ def test_initial_null_foreground_does_not_create_a_passing_observer(windows_prob
         module.WindowObserver(api)
 
 
-def test_null_foreground_is_retained_without_stopping_later_observation(windows_probe: tuple) -> None:
+def test_null_foreground_is_retained_without_stopping_later_observation(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
@@ -328,7 +331,7 @@ def test_null_foreground_is_retained_without_stopping_later_observation(windows_
     }
 
 
-def test_windows_new_fixture_window_and_focus_are_observed(windows_probe: tuple) -> None:
+def test_windows_new_fixture_window_and_focus_are_observed(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
@@ -342,7 +345,7 @@ def test_windows_new_fixture_window_and_focus_are_observed(windows_probe: tuple)
     assert all(item["attribution"] == "fixture" for item in packet["violations"])
 
 
-def test_windows_unattributed_console_broker_never_silently_passes(windows_probe: tuple) -> None:
+def test_windows_unattributed_console_broker_never_silently_passes(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
@@ -352,7 +355,7 @@ def test_windows_unattributed_console_broker_never_silently_passes(windows_probe
     assert observer.packet()["violations"][0]["attribution"] == "ambiguous-console-host"
 
 
-def test_windows_late_worker_identity_retroactively_attributes_event(windows_probe: tuple) -> None:
+def test_windows_late_worker_identity_retroactively_attributes_event(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
@@ -365,7 +368,7 @@ def test_windows_late_worker_identity_retroactively_attributes_event(windows_pro
     assert observer.packet()["violations"][0]["attribution"] == "fixture"
 
 
-def test_windows_monitoring_gap_is_a_failed_observation(windows_probe: tuple) -> None:
+def test_windows_monitoring_gap_is_a_failed_observation(windows_probe: tuple[ModuleType, ModuleType]) -> None:
     module, _ = windows_probe
     observer = module.WindowObserver(DesktopStub(module))
     observer.sample()
@@ -374,13 +377,13 @@ def test_windows_monitoring_gap_is_a_failed_observation(windows_probe: tuple) ->
 
 
 def test_windows_background_observer_failure_cannot_mint_zero_window_pass(
-    windows_probe: tuple,
+    windows_probe: tuple[ModuleType, ModuleType],
 ) -> None:
     module, _ = windows_probe
     api = DesktopStub(module)
     observer = module.WindowObserver(api)
     observer.stop = SimpleNamespace(wait=lambda _: False)
-    api.event_hooks = Mock(side_effect=TypeError("native signature mismatch"))
+    setattr(api, "event_hooks", Mock(side_effect=TypeError("native signature mismatch")))
     observer._run()
     assert "TypeError" in observer.packet()["observer_error"]
     assert observer.packet()["passed"] is False
@@ -394,12 +397,12 @@ def test_windows_background_observer_failure_cannot_mint_zero_window_pass(
     (2, 400, 300, True, True),
 ])
 def test_windows_proof_requires_two_real_cycles_and_job_control(
-    windows_probe: tuple, cycles: int, duration: int, spacing: int,
+    windows_probe: tuple[ModuleType, ModuleType], cycles: int, duration: int, spacing: int,
     control_exit: bool, expected: bool,
 ) -> None:
     _, adapter = windows_probe
     packet = {"passed": True, "observed_seconds": duration}
-    handover = {
+    handover: dict[str, Any] = {
         "observed_cycles": cycles, "observed_cycle_spacing_seconds": spacing,
         "windows_job_lifetime": {
             "inner_job_closed": True,
@@ -418,7 +421,7 @@ def test_windows_proof_requires_two_real_cycles_and_job_control(
 
 
 def test_windows_job_helper_executes_exact_command_and_contains_control(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = importlib.import_module("windows_job")
     from agent_procutil import _daemon_instance_identity
@@ -458,7 +461,7 @@ def test_windows_job_helper_executes_exact_command_and_contains_control(
 
 @pytest.mark.parametrize("long_command", [False, True])
 def test_windows_session_uses_strict_canonical_job_and_health_after_close(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_command: bool,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_command: bool,
 ) -> None:
     module, adapter = windows_probe
     root = tmp_path
@@ -534,7 +537,7 @@ def test_windows_session_uses_strict_canonical_job_and_health_after_close(
         startup.remove_autostart.assert_called_once_with(root)
 @pytest.mark.parametrize("defect", ["none", "foreign-slot", "wrong-launcher"])
 def test_native_mainpid_checks_the_actual_retained_worker_command(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
 ) -> None:
     from worktree_manager import automatic_updates_startup as startup
 
@@ -566,7 +569,7 @@ def test_native_mainpid_checks_the_actual_retained_worker_command(
 
 
 def test_native_registration_binds_only_its_fixture_lifecycle(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agent_procutil import _daemon_instance_store as store
     from agent_procutil.daemon_instances import TEST_CONTEXT_ENV
@@ -589,7 +592,7 @@ def test_native_registration_binds_only_its_fixture_lifecycle(
 
 @pytest.mark.parametrize("defect", ["none", "production", "foreign-run", "foreign-owner", "no-expiry", "foreign-pid"])
 def test_native_mainpid_requires_this_run_and_disposable_expiry(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
 ) -> None:
     from agent_procutil import _daemon_instance_store as store, daemon_instances
 
@@ -624,7 +627,7 @@ def test_native_mainpid_requires_this_run_and_disposable_expiry(
 
 @pytest.mark.parametrize("known_entry", [True, False])
 def test_failed_successor_fixture_uses_only_the_late_console_entry(
-    windows_probe: tuple, tmp_path: Path, known_entry: bool,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, known_entry: bool,
 ) -> None:
     fixtures = importlib.import_module("fixtures")
     repository = Path(__file__).resolve().parents[2]
@@ -651,11 +654,13 @@ def test_failed_successor_fixture_uses_only_the_late_console_entry(
     assert isinstance(failure, ast.If) and "automatic-updates" in ast.unparse(failure.test)
     assert "run" in ast.unparse(failure.test)
     assert failure.lineno > imported_sys.lineno
-    assert ast.unparse(syntax.body[-1].body[0]) == "console_entry()"
+    entry = syntax.body[-1]
+    assert isinstance(entry, ast.If)
+    assert ast.unparse(entry.body[0]) == "console_entry()"
 
 
 def test_cycle_witness_uses_loaded_package_and_retained_runtime_not_file_depth(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import worktree_manager
 
@@ -682,10 +687,8 @@ def test_cycle_witness_uses_loaded_package_and_retained_runtime_not_file_depth(
 
 
 def test_cycle_events_are_complete_before_the_reader_can_observe_them(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from worktree_manager import automatic_updates_policy
-
     fixtures = importlib.import_module("fixtures")
     identity = importlib.import_module("identity")
     root = tmp_path / "fixture"
@@ -701,10 +704,10 @@ def test_cycle_events_are_complete_before_the_reader_can_observe_them(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     paths = [root / "probe" / f"cycle-001-{stage}.json" for stage in ("begin", "end")]
-    observed = []
-    dump = automatic_updates_policy.json.dump
+    observed: list[Path] = []
+    dump = json.dump
 
-    def partial_write(value, stream, **kwargs):
+    def partial_write(value: object, stream: TextIO, **kwargs: Any) -> None:
         stream.write("{")
         stream.flush()
         destination = paths[len(observed)]
@@ -714,7 +717,7 @@ def test_cycle_events_are_complete_before_the_reader_can_observe_them(
         stream.truncate()
         dump(value, stream, **kwargs)
 
-    monkeypatch.setattr(automatic_updates_policy.json, "dump", partial_write)
+    monkeypatch.setattr(json, "dump", partial_write)
     assert module.execute() == 0
     assert observed == paths
     for path in paths:
@@ -726,7 +729,7 @@ def test_cycle_events_are_complete_before_the_reader_can_observe_them(
 
 @pytest.mark.parametrize("valid", [True, False])
 def test_fixture_only_native_binding_reaches_startup_before_worker_admission(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid: bool,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid: bool,
 ) -> None:
     from agent_procutil.daemon_instances import TEST_CONTEXT_ENV
 
@@ -753,7 +756,7 @@ def test_fixture_only_native_binding_reaches_startup_before_worker_admission(
 
 
 def test_native_update_execution_uses_private_driver_root(
-    windows_probe: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd,
+    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
 ) -> None:
     import update_driver as driver
     from worktree_manager import update_driver_cli
@@ -787,7 +790,7 @@ def test_native_update_execution_uses_private_driver_root(
     ))
     starts = []
 
-    def ensure_worker(argv, *, env):
+    def ensure_worker(argv: list[str], *, env: dict[str, str]) -> None:
         assert driver.default_root().is_relative_to(private_home)
         assert env["HOME"] == env["USERPROFILE"] == str(private_home)
         starts.append(argv)

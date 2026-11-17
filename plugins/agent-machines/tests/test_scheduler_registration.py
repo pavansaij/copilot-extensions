@@ -12,6 +12,7 @@ import pytest
 from agent_machines import fleet_update, fleet_update_tasks, self_update_tasks
 from agent_machines.legacy_fleet_definitions import historical_windows_arguments
 from agent_machines.scheduler_retirement import RetirementBusy, RetirementRefused
+from agent_machines.self_update_state import TIER_SPECS
 
 from ._manager_compatibility_helpers import default_policy
 from ._scheduler_safety_helpers import fixture_unit_properties
@@ -295,10 +296,10 @@ def test_self_registration_windows_rebinds_exact_owned_inactive_definition(
         tmp_path, initial, calls, registered=self_windows_payload(tmp_path, new),
     )
     if direct:
-        result = self_update_tasks.register_scheduled_task(
+        registered = self_update_tasks.register_scheduled_task(
             "sweep", home=tmp_path, machine=new, runner=runner, resolve_binary=lambda name: name,
         )
-        assert result.returncode == 0
+        assert registered.returncode == 0
     else:
         result = self_update_tasks.reconcile_scheduled_task(
             "sweep", desired_present=True, home=tmp_path, machine=new, runner=runner,
@@ -363,7 +364,7 @@ def test_self_registration_windows_rebind_preserves_unsafe_definition(
 def self_linux_units(home: Path, machine: str | None) -> Path:
     directory = self_update_tasks._linux_unit_dir(home)
     directory.mkdir(parents=True)
-    name = self_update_tasks.TIER_SPECS["sweep"].task_name
+    name = TIER_SPECS["sweep"].task_name
     (directory / f"{name}.service").write_text(
         self_update_tasks.render_linux_service_unit("sweep", home=home, machine=machine),
         encoding="utf-8",
@@ -389,8 +390,8 @@ def test_self_registration_linux_rebinds_exact_owned_inactive_definition(
         resolve_binary=lambda name: name,
     )
     if direct:
-        result = self_update_tasks.register_systemd_timer("sweep", **kwargs)
-        assert result.returncode == 0
+        registered = self_update_tasks.register_systemd_timer("sweep", **kwargs)
+        assert registered.returncode == 0
     else:
         result = self_update_tasks.reconcile_scheduled_task(
             "sweep", desired_present=True, **kwargs,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ from agent_machines.legacy_fleet_definitions import (
 )
 from agent_machines.resource_fleet_update import FleetUpdateResourceHandler
 from agent_machines.resources import ResolvedResource, ResourceContext
+from agent_machines.self_update_state import lock_path
+from agent_machines.self_update_types import StepResult
 
 from ._manager_compatibility_helpers import unit_guarded_manager_update
 from ._scheduler_safety_helpers import unit_properties
@@ -164,7 +167,7 @@ def test_automatic_ownership_self_sweep_preserves_maintenance(
     monkeypatch.setattr(
         self_update,
         "sweep_repo_paths",
-        lambda repos, **kwargs: [self_update.StepResult("git-pull", "ok", "sync preserved")],
+        lambda repos, **kwargs: [StepResult("git-pull", "ok", "sync preserved")],
     )
 
     def runner(argv: list[str], **kwargs: Any) -> self_update.CommandResult:
@@ -199,14 +202,14 @@ def test_automatic_ownership_watchdog_does_not_depend_on_manager(
     monkeypatch.setattr(
         self_update,
         "ensure_watchdog",
-        lambda **kwargs: [self_update.StepResult("dtssh-launcher", "ok")],
+        lambda **kwargs: [StepResult("dtssh-launcher", "ok")],
     )
     result = self_update.run_tier(
         "watchdog",
         opted_in=True,
         home=tmp_path,
-        host_healer=lambda: self_update.StepResult("dtssh-host-health", "ok"),
-        mesh_refresher=lambda: self_update.StepResult("mesh", "ok"),
+        host_healer=lambda: StepResult("dtssh-host-health", "ok"),
+        mesh_refresher=lambda: StepResult("mesh", "ok"),
     )
     assert result.ok
     assert [step.name for step in result.steps] == ["dtssh-launcher", "dtssh-host-health", "mesh"]
@@ -321,11 +324,11 @@ def test_automatic_ownership_generated_fleet_trigger_identified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(fleet_update_tasks.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     unit = fleet_update_tasks.render_linux_service_unit("sweep", home=tmp_path)
     assert "fleet-update run --tier sweep" in unit
     assert "--automatic-trigger" not in unit
-    monkeypatch.setattr(fleet_update_tasks.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
     args = fleet_update_tasks.task_action_arguments("sweep", home=tmp_path)
     assert "fleet-update run --tier sweep" in args
     assert "--automatic-trigger" not in args
@@ -337,7 +340,7 @@ def test_automatic_ownership_inventory_reports_old_trigger_and_inflight(
     monkeypatch: pytest.MonkeyPatch,
     active: str,
 ) -> None:
-    monkeypatch.setattr(legacy_update_inventory.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     units = tmp_path / ".config" / "systemd" / "user"
     units.mkdir(parents=True)
     service = units / "agent-machines-fleet-update-sweep.service"
@@ -387,7 +390,7 @@ def test_automatic_ownership_inventory_unavailable_is_blocker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(legacy_update_inventory.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(fleet_update, "shutil_which", lambda binary: None)
     monkeypatch.setattr(self_update, "shutil_which", lambda binary: None)
     results = legacy_update_inventory.inventory_legacy_updates(home=tmp_path)
@@ -400,11 +403,11 @@ def test_automatic_ownership_inventory_finds_manual_inflight_lock(
 ) -> None:
     from agent_machines import self_update_lock
 
-    monkeypatch.setattr(legacy_update_inventory.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(fleet_update, "shutil_which", lambda binary: None)
     monkeypatch.setattr(self_update, "shutil_which", lambda binary: None)
     monkeypatch.setattr(self_update_lock, "_pid_alive", lambda pid: True)
-    path = self_update_lock.lock_path("sweep", tmp_path)
+    path = lock_path("sweep", tmp_path)
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"pid": 123, "started_at": "2026-01-01T00:00:00+00:00"}))
     result = legacy_update_inventory.inventory_legacy_updates(home=tmp_path)[1]
@@ -419,7 +422,7 @@ def test_automatic_ownership_windows_inventory_preserves_uncertainty(
     monkeypatch: pytest.MonkeyPatch,
     state: str | None,
 ) -> None:
-    monkeypatch.setattr(legacy_update_inventory.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
     for tasks in (fleet_update_tasks, self_update_tasks):
 
         def snapshot(*args: Any, _tasks: Any = tasks, **kwargs: Any) -> Any:
@@ -477,7 +480,7 @@ def test_automatic_ownership_invalid_policy_status_is_loud(
     monkeypatch.setattr(
         fleet_update,
         "scheduled_task_status",
-        lambda *args, **kwargs: fleet_update.ScheduledTaskStatus(
+        lambda *args, **kwargs: fleet_update_tasks.ScheduledTaskStatus(
             "sweep",
             False,
             "example",

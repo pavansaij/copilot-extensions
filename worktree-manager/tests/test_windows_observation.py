@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import threading
 from types import ModuleType, SimpleNamespace
-from typing import Callable
+from typing import Any, Callable, NoReturn
 from unittest.mock import Mock
 
 import pytest
@@ -17,17 +17,17 @@ from test_automatic_updates_native import DesktopStub
 
 
 @pytest.fixture
-def probe(monkeypatch):
+def probe(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     scenario = Path(__file__).resolve().parents[2] / "tools/clean-room/scenarios/manager-automatic-updates"
     monkeypatch.syspath_prepend(str(scenario))
     return importlib.import_module("windows_api")
 
 
-def test_direct_foreground_identity_is_not_joined_to_earlier_window_enumeration(probe):
+def test_direct_foreground_identity_is_not_joined_to_earlier_window_enumeration(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
     api.front = 20
-    api.window_identity = lambda hwnd: (123456, 77) if hwnd == 20 else (api.root.pid, 42)
+    setattr(api, "window_identity", lambda hwnd: (123456, 77) if hwnd == 20 else (api.root.pid, 42))
     observer.sample()
     packet = observer.packet()
     assert {event["kind"] for event in packet["violations"]} == {
@@ -39,13 +39,13 @@ def test_direct_foreground_identity_is_not_joined_to_earlier_window_enumeration(
     assert packet["raw_events"][0]["neighbor_after"]["index"] == 0
 
 
-def test_null_and_direct_identity_failure_remain_distinct_and_observation_continues(probe):
+def test_null_and_direct_identity_failure_remain_distinct_and_observation_continues(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
     api.front = 0
     observer.sample()
     api.front = 20
-    api.window_identity = Mock(side_effect=RuntimeError("window destroyed before PID query"))
+    setattr(api, "window_identity", Mock(side_effect=RuntimeError("window destroyed before PID query")))
     observer.sample()
     assert observer.samples == 2
     packet = observer.packet()
@@ -56,21 +56,24 @@ def test_null_and_direct_identity_failure_remain_distinct_and_observation_contin
     assert packet["passed"] is False
 
 
-def test_sampling_never_runs_toolhelp_process_pinning_or_lineage(probe):
+def test_sampling_never_runs_toolhelp_process_pinning_or_lineage(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
-    api.refresh_processes = Mock(side_effect=AssertionError("slow census on critical path"))
-    api.process = Mock(side_effect=AssertionError("slow pin on critical path"))
-    api.lineage = Mock(side_effect=AssertionError("slow lineage on critical path"))
+    refresh = Mock(side_effect=AssertionError("slow census on critical path"))
+    process = Mock(side_effect=AssertionError("slow pin on critical path"))
+    lineage = Mock(side_effect=AssertionError("slow lineage on critical path"))
+    setattr(api, "refresh_processes", refresh)
+    setattr(api, "process", process)
+    setattr(api, "lineage", lineage)
     for _ in range(3):
         observer.sample()
     assert observer.samples == 3
-    api.refresh_processes.assert_not_called()
-    api.process.assert_not_called()
-    api.lineage.assert_not_called()
+    refresh.assert_not_called()
+    process.assert_not_called()
+    lineage.assert_not_called()
 
 
-def test_hook_retains_a_b_a_between_identical_foreground_polls(probe):
+def test_hook_retains_a_b_a_between_identical_foreground_polls(probe: ModuleType) -> None:
     observer = probe.WindowObserver(DesktopStub(probe))
     observer.sample()
     observer.event(3, 20, 0, 0, 123, 100)
@@ -82,7 +85,7 @@ def test_hook_retains_a_b_a_between_identical_foreground_polls(probe):
     assert events[0]["source_thread"] == 123 and events[0]["generated_ms"] == 100
 
 
-def test_short_lived_show_is_not_lost_when_enrichment_is_impossible(probe):
+def test_short_lived_show_is_not_lost_when_enrichment_is_impossible(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
     observer.event(0x8000, 20, 0, 0, 123, 100)
@@ -97,7 +100,7 @@ def test_short_lived_show_is_not_lost_when_enrichment_is_impossible(probe):
     assert packet["violations"][0]["hwnd"] == 20
 
 
-def test_delayed_non_window_callback_is_a_coverage_failure(probe):
+def test_delayed_non_window_callback_is_a_coverage_failure(probe: ModuleType) -> None:
     observer = probe.WindowObserver(DesktopStub(probe))
     observer.event(0x8000, 20, -4, 3, 123, 100, 501)
     packet = observer.packet()
@@ -106,7 +109,7 @@ def test_delayed_non_window_callback_is_a_coverage_failure(probe):
     assert packet["passed"] is False
 
 
-def test_callback_error_and_overflow_are_explicit_failures(probe):
+def test_callback_error_and_overflow_are_explicit_failures(probe: ModuleType) -> None:
     observer = probe.WindowObserver(DesktopStub(probe))
     observer.callback_failed(ValueError("invalid callback"))
     observer.EVENT_LIMIT = 2
@@ -118,7 +121,7 @@ def test_callback_error_and_overflow_are_explicit_failures(probe):
     assert packet["passed"] is False
 
 
-def test_capture_brackets_include_slow_calls_and_retain_neighbors(probe, monkeypatch):
+def test_capture_brackets_include_slow_calls_and_retain_neighbors(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_observation")
     now = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
@@ -127,11 +130,11 @@ def test_capture_brackets_include_slow_calls_and_retain_neighbors(probe, monkeyp
     raw = api.raw_windows
     observer.sample()
 
-    def slow_windows():
+    def slow_windows() -> dict[int, tuple[int, int]]:
         now[0] += 0.6
         return raw()
 
-    api.raw_windows = slow_windows
+    setattr(api, "raw_windows", slow_windows)
     observer.sample()
     packet = observer.packet()
     assert packet["maximum_observation_gap_seconds"] == pytest.approx(0.6)
@@ -143,7 +146,7 @@ def test_capture_brackets_include_slow_calls_and_retain_neighbors(probe, monkeyp
     assert packet["capture_stage_maximum_seconds"]["visible"] == pytest.approx(0.6)
 
 
-def test_readiness_precedes_body_and_final_sample_precedes_sealing(probe):
+def test_readiness_precedes_body_and_final_sample_precedes_sealing(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
     with observer:
@@ -161,7 +164,7 @@ def test_readiness_precedes_body_and_final_sample_precedes_sealing(probe):
         observer.add_pid(os.getpid())
 
 
-def test_completed_packet_is_immutable_and_never_extends_its_end_time(probe, monkeypatch):
+def test_completed_packet_is_immutable_and_never_extends_its_end_time(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_observation")
     observer = probe.WindowObserver(DesktopStub(probe))
     with observer:
@@ -173,7 +176,7 @@ def test_completed_packet_is_immutable_and_never_extends_its_end_time(probe, mon
     assert observer.packet() == first
 
 
-def test_invalid_first_capture_blocks_before_fixture_launch(probe):
+def test_invalid_first_capture_blocks_before_fixture_launch(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
     api.front = 0
@@ -185,20 +188,20 @@ def test_invalid_first_capture_blocks_before_fixture_launch(probe):
     assert observer.packet()["passed"] is False
 
 
-def test_long_stop_tail_and_cleanup_failure_cannot_pass(probe, monkeypatch):
+def test_long_stop_tail_and_cleanup_failure_cannot_pass(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_observation")
     now = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
 
-    def close():
+    def close() -> None:
         now[0] += 0.6
         raise RuntimeError("unhook failed")
 
-    api.event_hooks = lambda *args: SimpleNamespace(
+    setattr(api, "event_hooks", lambda *args: SimpleNamespace(
         count=2, start=lambda: None, drain=lambda: None, close=close,
-    )
+    ))
     observer.stop.set()
     observer._run()
     packet = observer.packet()
@@ -208,26 +211,26 @@ def test_long_stop_tail_and_cleanup_failure_cannot_pass(probe, monkeypatch):
     assert packet["passed"] is False
 
 
-def test_slow_startup_blocks_readiness_even_with_normal_final_captures(probe, monkeypatch):
+def test_slow_startup_blocks_readiness_even_with_normal_final_captures(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_observation")
     now = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
 
-    def start():
+    def start() -> None:
         now[0] += 0.6
 
-    api.event_hooks = lambda *args: SimpleNamespace(
+    setattr(api, "event_hooks", lambda *args: SimpleNamespace(
         count=2, start=start, drain=lambda: None, close=lambda: None,
-    )
+    ))
     with pytest.raises(probe.NativeBlocked, match="observer-not-ready"):
         with observer:
             pytest.fail("invalid start reached fixture")
     assert observer.packet()["maximum_observation_gap_seconds"] == pytest.approx(0.6)
 
 
-def hooks_fixture():
+def hooks_fixture() -> tuple[Any, SimpleNamespace, Mock, Mock]:
     module = importlib.import_module("windows_events")
     user = SimpleNamespace(**{
         name: Mock() for name in ("SetWinEventHook", "UnhookWinEvent",
@@ -241,7 +244,7 @@ def hooks_fixture():
     return module.WinEventHooks(user, kernel, receive, failure), user, receive, failure
 
 
-def test_hooks_use_registering_thread_no_skip_flags_and_checked_unhook(probe):
+def test_hooks_use_registering_thread_no_skip_flags_and_checked_unhook(probe: ModuleType) -> None:
     hooks, user, receive, failure = hooks_fixture()
     hooks.start()
     assert hooks.count == 2
@@ -258,14 +261,14 @@ def test_hooks_use_registering_thread_no_skip_flags_and_checked_unhook(probe):
 
 
 @pytest.mark.parametrize("error", [RuntimeError("callback witness"), KeyboardInterrupt("callback cancelled")])
-def test_hooks_report_callback_failure_without_ctypes_discarding_it(probe, error):
+def test_hooks_report_callback_failure_without_ctypes_discarding_it(probe: ModuleType, error: BaseException) -> None:
     hooks, _, receive, failure = hooks_fixture()
     receive.side_effect = error
     hooks.callback(11, 3, 20, 0, 0, 99, 1)
     assert failure.call_args.args[0] is error
 
 
-def test_partial_hook_registration_still_retires_exact_first_hook(probe):
+def test_partial_hook_registration_still_retires_exact_first_hook(probe: ModuleType) -> None:
     hooks, user, _, _ = hooks_fixture()
     user.SetWinEventHook.side_effect = [11, 0]
     # Non-Windows ctypes has no last-error accessor.
@@ -278,7 +281,7 @@ def test_partial_hook_registration_still_retires_exact_first_hook(probe):
     assert user.UnhookWinEvent.call_args.args == (11,)
 
 
-def test_failed_unhook_does_not_prevent_other_hook_cleanup(probe, monkeypatch):
+def test_failed_unhook_does_not_prevent_other_hook_cleanup(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     hooks, user, _, _ = hooks_fixture()
     module = importlib.import_module("windows_events")
     monkeypatch.setattr(module.ct, "get_last_error", lambda: 5, raising=False)
@@ -289,11 +292,11 @@ def test_failed_unhook_does_not_prevent_other_hook_cleanup(probe, monkeypatch):
     assert user.UnhookWinEvent.call_count == 2 and hooks.handles == [11]
 
 
-def test_foreign_thread_cannot_pump_or_unhook(probe):
+def test_foreign_thread_cannot_pump_or_unhook(probe: ModuleType) -> None:
     hooks, user, _, _ = hooks_fixture()
     failures = []
 
-    def foreign():
+    def foreign() -> None:
         try:
             hooks.drain()
         except Exception as exc:
@@ -306,7 +309,7 @@ def test_foreign_thread_cannot_pump_or_unhook(probe):
     user.PeekMessageW.assert_not_called()
 
 
-def test_native_positive_controls_require_new_visible_effect_consent(probe, tmp_path, monkeypatch):
+def test_native_positive_controls_require_new_visible_effect_consent(probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_controls")
     api = Mock(side_effect=AssertionError("native API before consent"))
     monkeypatch.setattr(module, "WinAPI", api)
@@ -367,7 +370,7 @@ def test_positive_control_explicitly_shows_a_hidden_startup_window(
             return next(index for index, event in enumerate(state.events)
                         if index > after and event["kind"] == kind and event["hwnd"] == hwnd)
 
-        def packet(self) -> dict:
+        def packet(self) -> dict[str, Any]:
             if finalizer == "observer":
                 raise RuntimeError("observer finalizer failed")
             return {
@@ -416,9 +419,9 @@ def test_positive_control_explicitly_shows_a_hidden_startup_window(
     api.close.assert_called_once()
 
 
-def test_positive_control_proof_needs_show_and_both_foreground_events(probe):
+def test_positive_control_proof_needs_show_and_both_foreground_events(probe: ModuleType) -> None:
     module = importlib.import_module("windows_controls")
-    packet = {
+    packet: dict[str, Any] = {
         "sealed": True, "hooks_closed": True, "hooks_registered": 2, "samples": 2,
         "maximum_observation_gap_seconds": 0.1, "passed": False,
         "raw_events": [{"kind": "show-event", "hwnd": 20},
@@ -454,7 +457,8 @@ def test_control_event_wait_observes_delayed_ordered_callback_without_native_ins
     observer = probe.WindowObserver(api)
     observer.event(3, 10, 0, 0, 123, 100)
     observer.event(3, 20, 0, 0, 123, 101)
-    api.process = Mock(side_effect=AssertionError("inspection while waiting for callback"))
+    process = Mock(side_effect=AssertionError("inspection while waiting for callback"))
+    setattr(api, "process", process)
 
     def poll(
         action: Callable[[], int | None], accept: Callable[[int | None], bool],
@@ -470,7 +474,7 @@ def test_control_event_wait_observes_delayed_ordered_callback_without_native_ins
 
     monkeypatch.setattr(module, "until", poll, raising=False)
     assert observer.wait_for_event("foreground-event", 10, after=1) == 2
-    api.process.assert_not_called()
+    process.assert_not_called()
 
 
 def test_control_event_wait_keeps_missing_callback_a_bounded_failure(
@@ -493,9 +497,9 @@ def test_control_event_wait_keeps_missing_callback_a_bounded_failure(
 
 @pytest.mark.parametrize(("thread", "pid", "valid"), [(1, 2, True), (0, 2, False), (1, 0, False)])
 def test_native_direct_identity_requires_both_thread_and_written_pid(
-    probe, monkeypatch, thread, pid, valid,
-):
-    def identify(hwnd, pointer):
+    probe: ModuleType, monkeypatch: pytest.MonkeyPatch, thread: int, pid: int, valid: bool,
+) -> None:
+    def identify(hwnd: int, pointer: Any) -> int:
         assert hwnd == 20
         pointer._obj.value = pid
         return thread
@@ -510,14 +514,14 @@ def test_native_direct_identity_requires_both_thread_and_written_pid(
             api.window_identity(20)
 
 
-def test_pump_overflow_and_quit_remain_blocking(probe):
+def test_pump_overflow_and_quit_remain_blocking(probe: ModuleType) -> None:
     hooks, user, _, _ = hooks_fixture()
     user.PeekMessageW.return_value = True
     with pytest.raises(probe.NativeBlocked, match="hook-pump-overflow"):
         hooks.drain()
     assert user.DispatchMessageW.call_count == 4096
 
-    def quit(pointer, *args):
+    def quit(pointer: Any, *args: Any) -> bool:
         pointer._obj.message = 0x12
         return True
 
@@ -526,13 +530,13 @@ def test_pump_overflow_and_quit_remain_blocking(probe):
         hooks.drain()
 
 
-def test_original_hook_error_and_separate_cleanup_error_both_survive(probe):
+def test_original_hook_error_and_separate_cleanup_error_both_survive(probe: ModuleType) -> None:
     api = DesktopStub(probe)
     observer = probe.WindowObserver(api)
-    api.event_hooks = lambda *args: SimpleNamespace(
+    setattr(api, "event_hooks", lambda *args: SimpleNamespace(
         count=0, start=Mock(side_effect=RuntimeError("registration failed")),
         close=Mock(side_effect=RuntimeError("unhook failed")),
-    )
+    ))
     observer._run()
     packet = observer.packet()
     assert packet["observer_error"] == "RuntimeError: registration failed"
@@ -540,7 +544,7 @@ def test_original_hook_error_and_separate_cleanup_error_both_survive(probe):
     assert packet["passed"] is False
 
 
-def test_failure_stack_rendering_waits_for_quiescence_and_retains_first_callback(probe, monkeypatch):
+def test_failure_stack_rendering_waits_for_quiescence_and_retains_first_callback(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("windows_observation")
     render = Mock(wraps=module.failure_details)
     monkeypatch.setattr(module, "failure_details", render)
@@ -565,9 +569,9 @@ def test_failure_stack_rendering_waits_for_quiescence_and_retains_first_callback
     assert render.call_count == 1
 
 
-def test_unprintable_callback_error_cannot_escape_or_pass(probe):
+def test_unprintable_callback_error_cannot_escape_or_pass(probe: ModuleType) -> None:
     class UnprintableError(Exception):
-        def __str__(self):
+        def __str__(self) -> str:
             raise RuntimeError("message unavailable")
 
     observer = probe.WindowObserver(DesktopStub(probe))
@@ -578,7 +582,7 @@ def test_unprintable_callback_error_cannot_escape_or_pass(probe):
 
 
 @pytest.mark.parametrize("method", ["windows", "raw_windows"])
-def test_enumeration_visibility_callback_retains_cancellation_cause(probe, method):
+def test_enumeration_visibility_callback_retains_cancellation_cause(probe: ModuleType, method: str) -> None:
     api = probe.WinAPI.__new__(probe.WinAPI)
     api.callback = lambda function: function
     primary = KeyboardInterrupt("visibility cancelled")
@@ -590,7 +594,7 @@ def test_enumeration_visibility_callback_retains_cancellation_cause(probe, metho
     assert raised.value.__cause__ is primary
 
 
-def test_api_close_attempts_all_owned_handles_and_keeps_failed_handle(probe, monkeypatch):
+def test_api_close_attempts_all_owned_handles_and_keeps_failed_handle(probe: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     api = probe.WinAPI.__new__(probe.WinAPI)
     api.handles = {1: 11, 2: 22}
     api.cleanup_failures = []
@@ -605,41 +609,41 @@ def test_api_close_attempts_all_owned_handles_and_keeps_failed_handle(probe, mon
 
 @pytest.mark.parametrize("fault", ["no-original", "restore-timeout", "destroy", "report"])
 def test_positive_control_failures_keep_focus_unknown_and_cleanup_truth(
-    probe, monkeypatch, tmp_path, fault,
-):
+    probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
+) -> None:
     module = importlib.import_module("windows_controls")
     front = [0 if fault == "no-original" else 10]
 
-    def activate(hwnd):
+    def activate(hwnd: int) -> bool:
         if not (fault == "restore-timeout" and hwnd == 10):
             front[0] = hwnd
         return True
 
-    def check(value, action):
+    def check(value: object, action: str) -> None:
         if not value:
             raise RuntimeError(action)
 
-    def poll(action, accept, **kwargs):
+    def poll(action: Callable[[], Any], accept: Callable[[Any], bool], **kwargs: Any) -> Any:
         value = action()
         if not accept(value):
             raise TimeoutError(kwargs["label"])
         return value
 
     class Observer:
-        def __init__(self, _api):
+        def __init__(self, _api: object) -> None:
             self.thread = SimpleNamespace(is_alive=lambda: False)
 
-        def __enter__(self):
+        def __enter__(self) -> Observer:
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *args: Any) -> None:
             pass
 
-        def wait_for_event(self, kind, hwnd, *, after=-1):
+        def wait_for_event(self, kind: str, hwnd: int, *, after: int=-1) -> int:
             return next(index for index, event in enumerate(self.packet()["raw_events"])
                         if index > after and event["kind"] == kind and event["hwnd"] == hwnd)
 
-        def packet(self):
+        def packet(self) -> dict[str, Any]:
             return {
                 "sealed": True, "hooks_closed": True, "hooks_registered": 2,
                 "samples": 1, "maximum_observation_gap_seconds": 0.1, "passed": False,
@@ -663,7 +667,7 @@ def test_positive_control_failures_keep_focus_unknown_and_cleanup_truth(
     monkeypatch.setattr(module.fixtures, "private_directory", lambda root: (root.mkdir(), root)[1])
     output = tmp_path / "controls"
     if fault == "report":
-        def failed_write(*args, **kwargs):
+        def failed_write(*args: Any, **kwargs: Any) -> NoReturn:
             raise OSError("report unavailable")
         monkeypatch.setattr(Path, "write_text", failed_write)
     with pytest.raises((probe.NativeBlocked, TimeoutError, RuntimeError, OSError)):
