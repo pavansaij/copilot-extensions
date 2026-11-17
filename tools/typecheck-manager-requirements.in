@@ -1,2 +1,2 @@
--r typecheck-toml-requirements.txt
+-r typecheck-runner-requirements.txt
 textual==8.2.8

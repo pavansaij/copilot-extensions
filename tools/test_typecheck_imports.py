@@ -79,7 +79,7 @@ def test_standalone_admission_copy_keeps_its_own_checked_scope(
         target.write_text(f"answer: int = {value}\n", encoding="utf-8")
     policies = typecheck.load_projects()
     selected = tuple(
-        replace(policy, import_roots=()) for policy in policies
+        replace(policy, import_roots=(), program_roots=()) for policy in policies
         if any(policy.owns(path) for path in paths)
     )
     assert len(selected) == 2
