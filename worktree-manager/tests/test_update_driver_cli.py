@@ -1276,18 +1276,30 @@ def test_self_install_reports_project_authority_refusal(
     ["--target", "agent-bridge", "--automatic-trigger", "external", "--controller", "example"],
     ["--target", "agent-bridge", "--auto"],
 ])
-def test_public_component_update_queues_manager_admission_before_engine_dispatch(
+def test_public_component_update_preserves_manual_dispatch_and_automatic_admission(
     queued: Queued, monkeypatch: pytest.MonkeyPatch, flags: list[str],
 ) -> None:
     from worktree_manager import engine_client
 
+    automatic = "--auto" in flags or "--automatic-trigger" in flags
+    dispatched = []
+
+    def passthrough(project, arguments, **options):
+        assert not automatic, "automatic targeted caller bypassed Manager admission"
+        dispatched.append((project, arguments, options))
+        return 6
+
     monkeypatch.setattr(
         engine_client, "run_engine_passthrough",
-        lambda *a, **k: pytest.fail("targeted caller bypassed Manager admission"),
+        passthrough,
     )
     seen, _request = queued
     assert driver.cmd_update_request(flags) == 6
-    automatic = "--auto" in flags or "--automatic-trigger" in flags
+    if not automatic:
+        assert dispatched == [(None, ["update", "--no-manager", *flags], {})]
+        assert "spec" not in seen
+        return
+    assert not dispatched
     expected = [*flags, "--auto"] if automatic and "--auto" not in flags else flags
     assert seen["spec"].backend == "manager" and seen["spec"].argv == tuple(expected)
     assert seen["spec"].repair is not automatic

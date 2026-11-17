@@ -514,6 +514,8 @@ def cmd_update_request(rest: list[str]) -> int:
 
             require_marketplace()
             if not _automatic_arguments(forwarded):
+                from . import engine_client
+
                 project, arguments = extract_project(forwarded)
                 observer = [
                     "--" + name.replace("_", "-")
