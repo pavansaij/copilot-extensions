@@ -886,10 +886,11 @@
         "libs/installer-engine",
         "libs/versioned-runtime",
         "worktree-manager/tests",
-        "worktree-manager/tests/native"
+        "worktree-manager/tests/native",
+        "worktree-manager/tests/production_picker"
       ],
       "python_version": "3.11",
-      "requirements": "tools/typecheck-runner-requirements.txt"
+      "requirements": "tools/typecheck-manager-requirements.txt"
     }
   ]
 }

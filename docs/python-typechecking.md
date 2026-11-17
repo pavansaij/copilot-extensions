@@ -73,6 +73,10 @@ code retains its Python 3.10 target. Manager uses its declared Python 3.11
 package minimum. These target corrections do not admit a pending scope or
 remove any file from the whole-file strict ratchet.
 
+Manager's pending scope uses a hash-locked extension of the TOML checker
+profile with its declared Textual dependency, so selected production-picker
+tests are checked against the real widget types rather than a missing import.
+
 ## Local commands
 
 From the source repository root, with Python and UV available:
