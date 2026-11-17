@@ -6,6 +6,7 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from zdd.cutover_lock import CutoverLock
@@ -26,8 +27,8 @@ def _arguments(origin: str | None) -> list[str]:
     return arguments + (["--controller", "example-controller"] if origin == "external" else [])
 
 
-def _assert_status(telemetry: Path, origin: str | None, outcome: str) -> dict:
-    status = json.loads((telemetry / "update-status.json").read_text(encoding="utf-8"))
+def _assert_status(telemetry: Path, origin: str | None, outcome: str) -> dict[str, Any]:
+    status: dict[str, Any] = json.loads((telemetry / "update-status.json").read_text(encoding="utf-8"))
     schema = json.loads((SCHEMAS / "update-status.schema.json").read_text(encoding="utf-8"))
     assert set(schema["required"]) <= status.keys()
     run_schema = schema["properties"]["run"]
@@ -40,7 +41,7 @@ def _assert_status(telemetry: Path, origin: str | None, outcome: str) -> dict:
     return status
 
 
-def _assert_events(status: dict, origin: str | None) -> list[dict]:
+def _assert_events(status: dict[str, Any], origin: str | None) -> list[dict[str, Any]]:
     schema = json.loads((SCHEMAS / "update-event.schema.json").read_text(encoding="utf-8"))
     events = [
         json.loads(line)
@@ -99,7 +100,7 @@ def test_admitted_runs_publish_canonical_trigger_and_separate_origin(
     ))
     calls = []
 
-    def execute(*args, **kwargs) -> int:
+    def execute(*args: Any, **kwargs: Any) -> int:
         calls.append((args, kwargs))
         _assert_status(telemetry, origin, "in_progress")
         return code
@@ -125,7 +126,7 @@ def test_admission_refusal_publishes_only_shared_vocabulary(
         arguments = ["--controller", "unexpected-controller"]
     guard = CutoverLock(policy.state_dir(tmp_path) / "update-transaction") if locked else nullcontext()
 
-    def forbidden(*args) -> int:
+    def forbidden(*args: object) -> int:
         pytest.fail("refused update reached installation work")
 
     with guard:

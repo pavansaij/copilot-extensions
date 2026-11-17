@@ -8,8 +8,8 @@ from pathlib import Path
 import sys
 import time
 
-from . import __version__
-from .automatic_updates_policy import atomic_json
+from worktree_manager import __version__
+from worktree_manager.automatic_updates_policy import atomic_json
 
 # Imported by the fixture main before its unchanged UpdateRun is constructed.
 if "WORKTREE_MANAGER_ROOT" in os.environ:
@@ -19,7 +19,7 @@ if "WORKTREE_MANAGER_ROOT" in os.environ:
     )
     if os.environ.get("WORKTREE_MANAGER_AUTOMATIC_UPDATES_UNIT"):
         from agent_procutil.daemon_instances import TEST_CONTEXT_ENV
-        from .automatic_updates_startup import checked_path
+        from worktree_manager.automatic_updates_startup import checked_path
 
         binding = checked_path(fixture_root / "probe" / "native-lifecycle.json")
         overlay = json.loads(binding.read_text(encoding="utf-8"))

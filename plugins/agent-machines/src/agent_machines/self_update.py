@@ -69,7 +69,7 @@ from .self_update_tasks import (
     scheduled_task_status as _scheduled_task_status,
 )
 from .self_update_types import (
-    CommandResult,
+    CommandResult as CommandResult,
     RunResult,
     StepResult,
     default_command_runner,

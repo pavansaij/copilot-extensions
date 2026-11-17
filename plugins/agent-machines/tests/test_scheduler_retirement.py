@@ -292,7 +292,7 @@ def test_scheduler_retirement_linux_blocks_without_disable_or_delete(
         next(directory.glob("*.service")).write_text("ExecStart=/foreign\n", encoding="utf-8")
     before = {path.name: path.read_bytes() for path in directory.iterdir()}
     calls: list[list[str]] = []
-    service = (
+    service: dict[str, Any] = (
         {"active": "active", "sub": "running", "pid": 123}
         if case == "running"
         else {"job": 123}

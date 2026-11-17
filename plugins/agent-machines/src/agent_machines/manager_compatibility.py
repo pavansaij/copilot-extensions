@@ -88,11 +88,18 @@ def _probe(
 
 def _help_protocol(text: str) -> str:
     lines = text.splitlines()
+    known_entry = (
+        "A bare invocation reads current installation state without changing it." in lines
+        or (
+            "Bare interactive entry opens Worktrees for one ready project, or Setup / Doctor." in lines
+            and "Redirected invocation prints installation status. Setup browsing never installs or adopts." in lines
+        )
+    )
     if (
         not lines
         or lines[0] != "usage: worktree-manager [--version] [--help] <command>"
         or "commands:" not in lines
-        or "A bare invocation reads current installation state without changing it." not in lines
+        or not known_entry
         or not re.search(r"(?m)^  --project NAME[ \t]+\S", text)
     ):
         raise ManagerCapabilityRefused("Manager global --help is not a known read-only protocol")

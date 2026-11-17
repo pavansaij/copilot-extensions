@@ -103,6 +103,10 @@ RETAINED_WINDOWS_SELECTION_STUB = (
 )
 # Exact current owner renderings add external bytecode caches and terminal routing.
 CURRENT_RETAINED_SELECTION_DIGESTS = {
+    "posix": "6fcbee70bde487cf763063d6a2533721b4a10cabe6a19fe2a2c82108057d0ecc",
+    "nt": "d3b51a19396ab637da6bc48ddf6f8a050d011e8de4787b85b8394c9a5b3319da",
+}
+_PREVIOUS_RETAINED_SELECTION_DIGESTS = {
     "posix": "1d378d9461dcb0c892d1b64f443c8a38dee4ff666ca484db62697bb3424b2c65",
     "nt": "60d75daa8101bfc8435426969fc4658b305067500cf3c57bfdbca0c3d8424b1b",
 }
@@ -229,6 +233,7 @@ def read_manager_selection(home: Path | None = None) -> ManagerSelection:
         supported = {
             hashlib.sha256(expected.encode("utf-8")).hexdigest(),
             CURRENT_RETAINED_SELECTION_DIGESTS[os.name],
+            _PREVIOUS_RETAINED_SELECTION_DIGESTS[os.name],
         }
         if not retained:
             supported.add(

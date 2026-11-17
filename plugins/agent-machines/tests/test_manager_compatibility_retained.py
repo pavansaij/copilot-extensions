@@ -127,11 +127,24 @@ def test_recognized_native_stubs_match_current_manager_owned_renderers(
 
 
 def test_current_manager_global_help_is_a_guarded_readonly_protocol() -> None:
-    source = Path(__file__).resolve().parents[3] / "worktree-manager/src/worktree_manager/__main__.py"
+    package = Path(__file__).resolve().parents[3] / "worktree-manager/src/worktree_manager"
+    entrypoint = ast.parse((package / "__main__.py").read_text(encoding="utf-8"))
+    delegations = [
+        node for node in ast.walk(entrypoint) if isinstance(node, ast.If)
+        and any(isinstance(item, ast.ImportFrom) and item.module == "cli_help" for item in node.body)
+    ]
+    assert len(delegations) == 1
+    load, render, done = delegations[0].body
+    assert isinstance(load, ast.ImportFrom) and load.names[0].name == "print_help"
+    assert isinstance(render, ast.Expr) and isinstance(render.value, ast.Call)
+    assert isinstance(render.value.func, ast.Name) and render.value.func.id == "print_help"
+    assert not render.value.args and not render.value.keywords
+    assert isinstance(done, ast.Return) and isinstance(done.value, ast.Constant) and done.value.value == 0
+    source = package / "cli_help.py"
     syntax = ast.parse(source.read_text(encoding="utf-8"))
     help_branches = []
     for node in ast.walk(syntax):
-        if not isinstance(node, ast.If):
+        if not isinstance(node, ast.FunctionDef) or node.name != "print_help":
             continue
         first = node.body[0]
         if (
@@ -151,6 +164,19 @@ def test_current_manager_global_help_is_a_guarded_readonly_protocol() -> None:
         assert isinstance(call.func, ast.Name) and call.func.id == "print"
         lines.append(ast.literal_eval(call.args[0]) if call.args else "")
     assert compatibility._help_protocol("\n".join(lines) + "\n") == "guarded"
+
+
+@pytest.mark.parametrize("entry", [
+    "",
+    "Bare interactive entry opens Worktrees for one ready project, or Setup / Doctor.",
+    "Redirected invocation prints installation status. Setup browsing never installs or adopts.",
+])
+def test_partial_entry_semantics_are_not_a_known_help_protocol(entry: str) -> None:
+    text = CURRENT_HELP.replace(
+        "A bare invocation reads current installation state without changing it.", entry,
+    )
+    with pytest.raises(compatibility.ManagerCapabilityRefused, match="known read-only protocol"):
+        compatibility._help_protocol(text)
 
 
 @pytest.mark.parametrize("help_text", [
@@ -379,17 +405,17 @@ def test_retained_python_may_link_to_base_but_payload_may_not(
     "",
     "  update --recover-for-repair [--json]  authorize queue release without cleanup proof; no install\n",
 ])
-def test_known_durable_update_help_versions_remain_guarded(repair_row):
+def test_known_durable_update_help_versions_remain_guarded(repair_row: str) -> None:
     assert compatibility._help_protocol(CURRENT_HELP + repair_row) == "guarded"
 
 
-def test_unknown_fourth_update_help_entry_is_not_a_legacy_fallback():
+def test_unknown_fourth_update_help_entry_is_not_a_legacy_fallback() -> None:
     help_text = CURRENT_HELP + "  update --recover-for-repair-now [--json]  unknown operation\n"
     with pytest.raises(compatibility.ManagerCapabilityRefused, match="ambiguous"):
         compatibility._help_protocol(help_text)
 
 
-def test_repair_only_help_is_not_a_general_legacy_update():
+def test_repair_only_help_is_not_a_general_legacy_update() -> None:
     help_text = "\n".join(
         line for line in CURRENT_HELP.splitlines() if not line.startswith("  update ")
     ) + "\n  update --recover-for-repair [--json]  no install\n"

@@ -22,7 +22,7 @@ from pathlib import Path, PureWindowsPath
 from sys import modules as _modules
 from typing import Any, Callable
 
-from .fleet_update_state import TIER_SPECS, tier_status
+from .fleet_update_state import TIER_SPECS as TIER_SPECS, tier_status
 from .legacy_fleet_definitions import FLEET_DESCRIPTION
 from .scheduler_retirement import (
     CommandOutcome, SchedulerRunner, TaskConfigWriter,

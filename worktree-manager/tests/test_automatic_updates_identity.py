@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import signal
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -14,7 +14,7 @@ from test_automatic_updates_native import windows_probe as windows_probe
 
 @pytest.mark.parametrize("birth", ["matching", "reused", "missing"])
 def test_windows_control_pin_never_terminates_a_reused_pid(
-    windows_probe: tuple, monkeypatch: pytest.MonkeyPatch, birth: str,
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch, birth: str,
 ) -> None:
     from agent_procutil import _daemon_instance_identity
 
@@ -52,12 +52,12 @@ def test_windows_control_pin_never_terminates_a_reused_pid(
 
 @pytest.mark.parametrize("birth", ["matching", "reused", "missing", "already-exited"])
 def test_linux_signal_pin_requires_authenticated_birth_and_live_kernel_custody(
-    windows_probe: tuple, monkeypatch: pytest.MonkeyPatch, birth: str,
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch, birth: str,
 ) -> None:
     from agent_procutil import _caller_owned, _daemon_instance_identity, _linux_pidfd
 
     identity = importlib.import_module("identity")
-    closed = []
+    closed: list[int] = []
     acquire, send = Mock(return_value=91), Mock()
     monkeypatch.setattr(identity, "os", SimpleNamespace(name="posix", close=closed.append))
     monkeypatch.setattr(identity, "sys", SimpleNamespace(platform="linux"))
