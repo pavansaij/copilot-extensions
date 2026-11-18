@@ -19,13 +19,14 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Callable, Iterator, Mapping, Protocol, Sequence, TextIO, TypedDict,
+    TYPE_CHECKING, Callable, Iterator, Literal, Mapping, Protocol, Sequence, TextIO, TypedDict,
     cast, overload,
 )
 
 from single_instance_lease.operation import OperationLock, OperationLockedError
 from . import _invocation, authority, boot, foundation_state
 from ._directory import create_queue_directory
+from ._sqlite import database_uri
 from ._invocation import RequestSpec as RequestSpec, TrustedRunner as TrustedRunner
 from ._invocation import spec_document as _spec_document
 from .pending_updates import capture_home as _capture_home
@@ -304,8 +305,8 @@ def _database(
             raise StateError("queue must be a plain local database")
         if expected_identity is not None:
             _assert_database_identity(path, expected_identity)
-        mode = "rwc" if create else ("rw" if writable else "ro")
-        db = sqlite3.connect(f"{path.as_uri()}?mode={mode}", uri=True, timeout=30)
+        mode: Literal["ro", "rw", "rwc"] = "rwc" if create else ("rw" if writable else "ro")
+        db = sqlite3.connect(database_uri(path, mode=mode), uri=True, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=30000")
         if writable:
