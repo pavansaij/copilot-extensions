@@ -266,7 +266,7 @@ def qualify_complete_native_entry(
     entry_started = time.monotonic()
     shell_event = "toolCalls" not in event and event.get("toolName") == "powershell"
     shell_proof = shell_event or literal_batch
-    source_names = (
+    source_names: tuple[str, ...] = (
         "pre-tool-hook.ps1", "managed-session.ps1", "hook-read-policy.json",
         "statelessness_guard.py", "cross_repo_guard.py", "anchor_write_guard.py",
         "pr_supersede_guard.py", "tool_call_forms.py", "guarded_anchor_map.py",
@@ -639,6 +639,7 @@ def test_native_write_fixture_stderr_survives_timeout(tmp_path: Path, shell: str
             [executable, "-NoProfile", "-NonInteractive", "-Command", command],
             input=b"", capture_output=True, timeout=10, cwd=tmp_path, **no_window_kwargs(),
         )
+    assert captured.value.stderr is not None
     launch, remaining = native_write_fixture_launch(captured.value.stderr)
     assert launch is not None, captured.value.stderr
     progress, errors = native_write_fixture_stderr(remaining)
@@ -975,9 +976,14 @@ def test_cache_is_scoped_to_session_and_selected_registry(tmp_path: Path, monkey
     anchor, registry = fixture_project(tmp_path)
     payload = {"sessionId": "first", "cwd": str(anchor)}
     assert module.admitted(payload, home=tmp_path)
-    calls = []
+    calls: list[tuple[Any, ...]] = []
     original = module._entries
-    monkeypatch.setattr(module, "_entries", lambda *args: calls.append(args) or original(*args))
+
+    def counted_entries(*args: Any) -> Any:
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(module, "_entries", counted_entries)
     assert module.admitted({**payload, "sessionId": "second"}, home=tmp_path)
     assert len(calls) == 2
     other = tmp_path / "other-installation"
@@ -1356,7 +1362,7 @@ def test_registered_pre_tool_entry_reuses_prepared_membership(tmp_path: Path, mo
     workspace = fixture_linked_worktree(tmp_path, anchor)[0]
     session = tmp_path / ".copilot" / "session-state" / "pre-tool"
     session.mkdir(parents=True)
-    payload = {
+    payload: dict[str, Any] = {
         "sessionId": "pre-tool", "cwd": str(workspace),
         "toolName": "view" if case in {"read", "cold-read", "read-batch"} else "edit",
         "toolArgs": {"path": "non-ascii-\u00e9.txt", "text": "quote'\"\\\n\t"},
@@ -1456,7 +1462,7 @@ def test_registered_prepared_cell_membership_read_requires_complete_native_proof
     fixtures._select(monkeypatch, context, plugin)
     session = tmp_path / ".copilot" / "session-state" / "pre-cell"
     session.mkdir(parents=True)
-    event = {
+    event: dict[str, Any] = {
         "sessionId": "pre-cell", "cwd": str(workspace),
         "toolName": case if case in {"view", "rg", "glob"} else "edit" if case == "write" else "view",
         "toolArgs": {"path": "non-ascii-\u00e9.txt", "text": "quote'\"\\\n\t"},
@@ -1652,7 +1658,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         config.write_bytes(f"default_branch: main{newline}stateless: true{newline}".encode("utf-8"))
     session = tmp_path / ".copilot" / "session-state" / "pre-write"
     session.mkdir(parents=True)
-    event = {
+    event: dict[str, Any] = {
         "sessionId": "pre-write", "cwd": str(workspace), "toolName": "edit",
         "toolArgs": {
             "path": {
@@ -1742,7 +1748,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         def patch(*headers: str) -> str:
             return "*** Begin Patch\n" + "".join(f"*** {header}\n" for header in headers) + "*** End Patch\n"
 
-        args = {"input": patch("Update File: source-\u00e9.py")}
+        args: dict[str, Any] = {"input": patch("Update File: source-\u00e9.py")}
         event["toolArgs"] = args
         if case in {"patch-patch", "patch-command"}:
             args[case.removeprefix("patch-")] = args.pop("input")
@@ -2306,21 +2312,21 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         source = native_entry.read_text(encoding="utf-8")
         boundary = "\ntry {\n    $reader = [IO.StreamReader]"
         assert source.count(boundary) == 1
-        reader = NATIVE_READ_V1 if case == "literal-shell-prior-reader" else NATIVE_SHELL_READ_V1
-        native_entry.write_text(source.replace(boundary, "\n" + reader + boundary, 1), encoding="utf-8")
+        prior_reader = NATIVE_READ_V1 if case == "literal-shell-prior-reader" else NATIVE_SHELL_READ_V1
+        native_entry.write_text(source.replace(boundary, "\n" + prior_reader + boundary, 1), encoding="utf-8")
     # Fixture-only markers classify a timeout without retrying or extending the child.
     instrumented = native_entry.read_text(encoding="utf-8")
-    for boundary, source in (
+    for boundary, statement in (
         ("script-entry", "$ErrorActionPreference = 'Stop'"),
         ("membership-start", "    $admitted = if ($supportsFacts) {"),
         ("membership-complete", "    if (-not $admitted) { exit 0 }"),
         ("native-proof-start", "function Test-NativePreToolWrite([object]$Payload, [object]$Facts) {"),
         ("policy-start", "function Invoke-PreToolPolicy([string]$Python, [string]$Payload, [ref]$Diagnostic) {"),
     ):
-        assert instrumented.count(source) == 1
+        assert instrumented.count(statement) == 1
         marker = f"Write-NativeWriteFixturePhase '{boundary}'"
         instrumented = instrumented.replace(
-            source, source + "\n" + marker if source.endswith("{") else marker + "\n" + source,
+            statement, statement + "\n" + marker if statement.endswith("{") else marker + "\n" + statement,
         )
     native_entry.write_text(instrumented, encoding="utf-8")
     admission = scripts / "managed-session.ps1"
@@ -2692,7 +2698,7 @@ def test_prepared_native_membership_rejects_changed_or_unavailable_inputs(
     nested.mkdir()
     session = tmp_path / ".copilot" / "session-state" / "prepared"
     session.mkdir(parents=True)
-    payload = {"sessionId": "prepared", "cwd": str(anchor if damage == "workspace-unicode" else nested)}
+    payload: dict[str, Any] = {"sessionId": "prepared", "cwd": str(anchor if damage == "workspace-unicode" else nested)}
     assert module.admitted(payload, home=tmp_path)
     marker = session / "agent-worktrees" / "managed-session.json"
     env = environment(tmp_path, nested)
@@ -3238,8 +3244,11 @@ assert.equal(calls, 4,
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, cwd=anchor, env=env, **no_window_kwargs(),
     )
-    visible, foreground, observed = set(), set(), set()
+    visible: set[int] = set()
+    foreground: set[int] = set()
+    observed: set[int] = set()
     try:
+        assert process.stdin is not None
         process.stdin.write(frame)
         process.stdin.close()
         process.stdin = None
@@ -3373,7 +3382,10 @@ def test_real_powershell_managed_pretool_preserves_protection(tmp_path: Path, re
     env["COPILOT_PLUGIN_ROOT"] = str(payload)
     event = json.dumps({"sessionId": "managed", "cwd": str(anchor), "toolName": "edit",
                         "toolArgs": {"path": str(anchor / "source.py")}})
-    visible, foreground, observed, timings = set(), set(), set(), []
+    visible: set[int] = set()
+    foreground: set[int] = set()
+    observed: set[int] = set()
+    timings: list[float] = []
     for _ in range(2):
         started = time.monotonic()
         process = subprocess.Popen(
@@ -3383,6 +3395,7 @@ def test_real_powershell_managed_pretool_preserves_protection(tmp_path: Path, re
             text=True, cwd=anchor, env=env, **no_window_kwargs(),
         )
         try:
+            assert process.stdin is not None
             process.stdin.write(event)
             process.stdin.close()
             process.stdin = None
