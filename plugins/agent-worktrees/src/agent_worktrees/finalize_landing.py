@@ -14,18 +14,21 @@ Split out of ``finalize.py`` (module-size guard).
 
 from __future__ import annotations
 
+from typing import Any
 from . import git_ops
+from .config import RepoConfig
+from .tracking import WorktreeRecord
 from .finalize_ref import Landing, creation_point, landing, report_history_snapshot
 
 
-def remote_ref(repo, branch: str) -> str:
+def remote_ref(repo: RepoConfig, branch: str) -> str:
     """*branch* on the repo's remote, fully qualified: an abbreviated ``origin/dev``
     resolves to a same-named local branch or tag first, which can hold unpublished
     commits."""
     return f"refs/remotes/{repo.remote}/{branch}"
 
 
-def tracks_pr(record, repo) -> bool:
+def tracks_pr(record: WorktreeRecord | None, repo: RepoConfig) -> bool:
     """Whether ``finalize`` decides this worktree through its tracked PR: PRs are
     enabled and a PR is tracked by its head branch **or** its number. A PR recorded
     without its branch (``set-pr`` with only ``--url``/``--number``, for work pushed
@@ -37,12 +40,13 @@ def tracks_pr(record, repo) -> bool:
                 and ((getattr(pr, "branch", "") or "").strip() or getattr(pr, "number", None)))
 
 
-def pr_base(record, repo) -> str:
+def pr_base(record: WorktreeRecord, repo: RepoConfig) -> str:
     """The PR's base on the remote (:func:`remote_ref`) when the tracked PR targets
     a branch other than the configured default one (read from the provider); ""
     otherwise or unknown."""
     from . import finalize_open_pr_gate as fopg, pr_creation_state
-    if pr_creation_state.cancelled(getattr(record, "pr", None)):
+    pr = record.pr
+    if pr is not None and pr_creation_state.cancelled(pr):
         return ""
     try:
         base = fopg.pr_base_ref(getattr(record, "pr", None), repo)
@@ -56,7 +60,7 @@ def describe(evidence: list[Landing]) -> str:
 
 
 def pr_content_landed(
-    record, repo, content_ref: str | None, *, cwd: str,
+    record: WorktreeRecord, repo: RepoConfig, content_ref: str | None, *, cwd: str,
 ) -> tuple[bool | None, str | None, list[Landing]]:
     """Steps (1) and (2) of ``finalize._pr_finalize_precondition`` on every base
     the PR's work may have landed on.
@@ -81,7 +85,7 @@ def pr_content_landed(
 
 
 def _pr_content_landed(
-    record, repo, content_ref: str | None, *, cwd: str,
+    record: WorktreeRecord, repo: RepoConfig, content_ref: str | None, *, cwd: str,
     checked: dict[str, Landing] | None = None,
     existing_bases: set[str] | None = None,
 ) -> tuple[bool | None, str | None, list[Landing]]:
@@ -133,7 +137,7 @@ def _pr_content_landed(
     return False, f"{message}\n{detail}" if detail else message, evidence
 
 
-def explain(record, repo, worktree_path: str, anchor: str) -> dict:
+def explain(record: WorktreeRecord, repo: RepoConfig, worktree_path: str, anchor: str) -> dict[str, Any]:
     """Read-only: what ``finalize`` would test to decide whether this PR-mode
     worktree's work landed, and every check's verdict -- nothing is fetched,
     finalized or recorded."""
@@ -142,7 +146,7 @@ def explain(record, repo, worktree_path: str, anchor: str) -> dict:
         return _explain(record, repo, worktree_path, anchor)
 
 
-def _explain(record, repo, worktree_path: str, anchor: str) -> dict:
+def _explain(record: WorktreeRecord, repo: RepoConfig, worktree_path: str, anchor: str) -> dict[str, Any]:
     from pathlib import Path
 
     from . import finalize_open_pr_gate as fopg

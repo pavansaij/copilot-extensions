@@ -25,13 +25,15 @@ def draft_confirmation(observed: object) -> dict[str, Any] | None:
     }
 
 
-def include_publication_metadata(result: dict[str, Any], pull: PullResult, *,
+def include_publication_metadata(result: dict[str, Any], pull: PullResult | None, *,
                                  requested_draft: bool = False,
                                  require_draft_observation: bool = False) -> None:
-    if type(getattr(pull, "draft", None)) is bool:
-        result["draft"] = pull.draft
-    if getattr(pull, "label_error", ""):
-        result["pr_label_error"] = pull.label_error
+    observed_draft = getattr(pull, "draft", None)
+    if type(observed_draft) is bool:
+        result["draft"] = observed_draft
+    label_error = getattr(pull, "label_error", "")
+    if label_error:
+        result["pr_label_error"] = label_error
     metadata = getattr(pull, "metadata", None) or {}
     if requested_draft and require_draft_observation:
         action = draft_confirmation(getattr(pull, "draft", None))

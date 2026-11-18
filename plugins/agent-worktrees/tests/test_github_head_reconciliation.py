@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -10,8 +11,8 @@ from agent_worktrees.providers.github import GitHubProvider
 
 
 @pytest.mark.parametrize("change", ["none", "open", "number", "branch", "head", "fork", "base", "multiple", "malformed"])
-def test_only_single_exact_merged_association_qualifies(monkeypatch, change):
-    row = {
+def test_only_single_exact_merged_association_qualifies(monkeypatch: pytest.MonkeyPatch, change: str) -> None:
+    row: dict[str, Any] = {
         "number": 12, "state": "closed", "merged_at": "2026-01-01T00:00:00Z",
         "head": {"ref": "pr/example", "sha": "abc", "repo": {"full_name": "example/repo"}},
         "base": {"repo": {"full_name": "example/repo"}},
@@ -28,11 +29,11 @@ def test_only_single_exact_merged_association_qualifies(monkeypatch, change):
         row["head"]["repo"]["full_name"] = "fork/repo"
     elif change == "base":
         row["base"]["repo"]["full_name"] = "example/other"
-    rows = [row, row] if change == "multiple" else [row]
+    rows: list[object] = [row, row] if change == "multiple" else [row]
     if change == "malformed":
         rows = [None]
-    calls = []
-    def run(argv, **kwargs):
+    calls: list[list[str]] = []
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
     monkeypatch.setattr(observation, "run_cli", run)
@@ -47,7 +48,7 @@ def test_only_single_exact_merged_association_qualifies(monkeypatch, change):
 
 
 @pytest.mark.parametrize("payload,code", [("[]", 0), ("[{}]", 0), ("{}", 0), ("null", 0), ("", 1), ("", 0)])
-def test_absence_is_not_an_unavailable_or_nonempty_response(monkeypatch, payload, code):
+def test_absence_is_not_an_unavailable_or_nonempty_response(monkeypatch: pytest.MonkeyPatch, payload: str, code: int) -> None:
     monkeypatch.setattr(
         observation, "run_cli",
         lambda argv, **kwargs: subprocess.CompletedProcess(argv, code, payload, "unavailable"),

@@ -8,6 +8,8 @@ import os
 import threading
 from functools import wraps
 from pathlib import Path
+from collections.abc import Callable, Iterator
+from typing import Any, ParamSpec, Protocol, TypeVar, cast
 
 import yaml
 
@@ -15,6 +17,8 @@ from . import config as cfg, pr_publication_state, pr_publish, publication_deadl
 from . import record_machine_identity
 
 _held = threading.local()
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class PublicationAuthorityBusy(TimeoutError):
@@ -42,10 +46,10 @@ class PublicationAuthorityBusy(TimeoutError):
         }
 
 
-def publication(function):
+def publication(function: Callable[P, R]) -> Callable[P, R]:
     signature = inspect.signature(function)
     @wraps(function)
-    def guarded(*args, **kwargs):
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
         arguments = signature.bind(*args, **kwargs).arguments
         config = arguments["config"]
         prcfg = arguments.get("prcfg", config.default_repo.pr)
@@ -54,23 +58,29 @@ def publication(function):
     return guarded
 
 
-def registry_transaction(function):
+def registry_transaction(function: Callable[P, R]) -> Callable[P, R]:
     @wraps(function)
-    def guarded(*args, **kwargs):
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
         with guard():
             return function(*args, **kwargs)
     return guarded
 
 
+class FinalizationFence(Protocol):
+    def acquire(self) -> None: ...
+    def release(self) -> None: ...
+
+
 class PublicationLock:
     """Acquire finalization before authority and release in reverse order."""
 
-    def __init__(self, finalization, record, pr, *, timeout):
+    def __init__(self, finalization: FinalizationFence, record: tracking.WorktreeRecord,
+                 pr: tracking.PRRecord, *, timeout: float | None) -> None:
         self.finalization = finalization
         self.record = record
         self.pr = pr
         self.timeout = timeout
-        self.authority = None
+        self.authority: contextlib.AbstractContextManager[None] | None = None
 
     def acquire(self) -> None:
         self.finalization.acquire()
@@ -93,7 +103,7 @@ class PublicationLock:
 
 
 @contextlib.contextmanager
-def guard(*, timeout: float | None = None):
+def guard(*, timeout: float | None = None) -> Iterator[None]:
     """Exclude PR association writers across all projects in this installation."""
     path = cfg.install_dir() / "pr-rewrite-authority.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +129,7 @@ def guard(*, timeout: float | None = None):
             pr_publish._unlock_publish_file(fh)
 
 
-def _projection(record: tracking.WorktreeRecord | None) -> tuple:
+def _projection(record: tracking.WorktreeRecord | None) -> tuple[object, ...]:
     if record is None or not record.prs:
         return ()
     return (record.repo, record.worktree_id, record.worktree_path, record.branch, tuple(
@@ -155,21 +165,22 @@ class _StrictLoader(yaml.SafeLoader):
     pass
 
 
-def _mapping(loader, node):
+def _mapping(loader: _StrictLoader, node: yaml.nodes.MappingNode) -> dict[object, Any]:
     loader.flatten_mapping(node)
+    construct = cast(Callable[[yaml.nodes.Node], object], loader.construct_object)
     result = {}
     for key_node, value_node in node.value:
-        key = loader.construct_object(key_node)
+        key = construct(key_node)
         if key in result:
             raise ValueError("Duplicate key in PR authority state.")
-        result[key] = loader.construct_object(value_node)
+        result[key] = construct(value_node)
     return result
 
 
 _StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
 
 
-def _read(path: Path, *, context: str = "PR authority state") -> dict:
+def _read(path: Path, *, context: str = "PR authority state") -> dict[str, Any]:
     try:
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLoader)
     except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
@@ -211,7 +222,7 @@ def _ledgers(project: str) -> dict[Path, str]:
     return {cfg.tracking_dir(name).resolve(): name for name in names}
 
 
-def _live_prs(data: dict, path: Path) -> list[dict]:
+def _live_prs(data: dict[str, Any], path: Path) -> list[dict[str, Any]]:
     if not isinstance(data.get("worktree_id"), str) or not data["worktree_id"]:
         raise ValueError(f"Missing worktree identity in PR authority state: {path}")
     if "pr" in data and data["pr"] is not None and not isinstance(data["pr"], dict):
