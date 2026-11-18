@@ -4,29 +4,33 @@ import json
 import os
 from pathlib import Path
 import sys
+from collections.abc import Iterator
+from typing import Any, Callable, cast
 
 import pytest
 
 from agent_worktrees import __main__ as cli
-from agent_worktrees import config as cfg, git_ops, output, pr_complete, tracking
+from agent_worktrees import config as cfg, front_door_cli, git_ops, output, pr_complete, tracking
 from test_pr_complete import _git, _squash_merge_upstream
 
+PrRepo = tuple[cfg.Config, str, Path, Path]
 
 @pytest.fixture
-def source(pr_repo, monkeypatch, tmp_path):
+def source(pr_repo: PrRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PrRepo:
     config, wid, root, remote = pr_repo
     directory = tmp_path / "manager" / "worktrees"
     directory.mkdir(parents=True)
     record = tracking.load_record_by_id(wid)
+    assert record is not None
     tracking.save_record(record, directory / f"{wid}.yaml")
     monkeypatch.setattr(cfg, "tracking_dir", lambda *_: directory)
     monkeypatch.setattr(cfg, "project_dir", lambda *_: directory.parent)
-    monkeypatch.setattr(cli.front_door_cli, "resolve_invocation_project", lambda *_: True)
+    monkeypatch.setattr(front_door_cli, "resolve_invocation_project", lambda *_: True)
     monkeypatch.chdir(root)
     return config, wid, root, remote
 
 
-def arguments(source, *extra):
+def arguments(source: PrRepo, *extra: str) -> list[str]:
     _config, _wid, root, remote = source
     return [
         "pr-complete", f"--repo={git_ops.slug_from_url(str(remote))}",
@@ -35,20 +39,22 @@ def arguments(source, *extra):
     ]
 
 
-def invoke(argv):
+def invoke(argv: list[str]) -> tuple[int, dict[str, Any]]:
     with output.capture_json_output() as capture:
         code = cli.main(argv)
-    return code, json.loads(capture.getvalue())
+    response: dict[str, Any] = json.loads(capture.getvalue())
+    return code, response
 
 
 @pytest.mark.parametrize("mode", ["squash", "followup", "unmerged", "fast-forward", "noop"])
-def test_guarded_real_history_preserves_original_tip_and_subsequent_work(source, mode):
+def test_guarded_real_history_preserves_original_tip_and_subsequent_work(source: PrRepo, mode: str) -> None:
     config, wid, root, _remote = source
     anchor = Path(config.default_repo.anchor)
     if mode in ("squash", "followup"):
         _squash_merge_upstream(anchor, files={"a.txt": "one\n", "b.txt": "two\n"}, msg="squash")
     if mode == "followup":
         record = tracking.load_record_by_id(wid)
+        assert record is not None
         record.pr = tracking.PRRecord(
             state="merged", head_sha=_git("rev-parse", "HEAD", cwd=root),
             base_sha=_git("merge-base", "origin/master", "HEAD", cwd=root),
@@ -91,7 +97,7 @@ def test_guarded_real_history_preserves_original_tip_and_subsequent_work(source,
 @pytest.mark.parametrize("damage", [
     "head", "branch", "dirty", "foreign", "record", "terminal", "anchor", "common", "detached", "remote",
 ])
-def test_bad_source_refuses_before_fetch_backup_or_reconciliation(source, monkeypatch, damage):
+def test_bad_source_refuses_before_fetch_backup_or_reconciliation(source: PrRepo, monkeypatch: pytest.MonkeyPatch, damage: str) -> None:
     config, wid, root, _remote = source
     args = arguments(source)
     if damage == "head":
@@ -130,7 +136,7 @@ def test_bad_source_refuses_before_fetch_backup_or_reconciliation(source, monkey
     assert not _git("for-each-ref", "--format=%(refname)", "refs/pre-complete-backups", cwd=root)
 
 
-def test_inherited_git_selectors_cannot_redirect_owner_or_leak_out_of_request(source, monkeypatch):
+def test_inherited_git_selectors_cannot_redirect_owner_or_leak_out_of_request(source: PrRepo, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _wid, root, _remote = source
     anchor = Path(config.default_repo.anchor)
     _squash_merge_upstream(anchor, files={"a.txt": "one\n", "b.txt": "two\n"}, msg="squash")
@@ -144,7 +150,7 @@ def test_inherited_git_selectors_cannot_redirect_owner_or_leak_out_of_request(so
     assert not index.exists()
     assert os.environ["GIT_DIR"] == str(anchor / ".git")
     assert os.environ["GIT_INDEX_FILE"] == str(index)
-    assert git_ops.git("rev-parse", "--absolute-git-dir", cwd=root).stdout.strip() == str(anchor / ".git")
+    assert Path(git_ops.git("rev-parse", "--absolute-git-dir", cwd=root).stdout.strip()).resolve() == (anchor / ".git").resolve()
     assert git_ops.git("rev-parse", "HEAD", cwd=anchor, isolated_repository=True).stdout.strip() == anchor_head
     assert git_ops.git("rev-parse", "HEAD", cwd=root, isolated_repository=True).stdout.strip() == anchor_head
 
@@ -153,13 +159,13 @@ def test_inherited_git_selectors_cannot_redirect_owner_or_leak_out_of_request(so
     ["--expected-head=abcd"], ["--expected-head=HEAD"], ["--expected-head=" + "A" * 40],
     ["--expected-branch="], ["--config=worker.json"], ["other-worktree"],
 ])
-def test_guarded_fields_cannot_degrade_to_legacy_selection(source, extra):
+def test_guarded_fields_cannot_degrade_to_legacy_selection(source: PrRepo, extra: list[str]) -> None:
     code, value = invoke([*arguments(source), *extra])
     assert code == 1 and value["status"] == "not-attempted", value
 
 
 @pytest.mark.parametrize("after_backup", [False, True])
-def test_rechecks_after_fetch_and_before_history_mutation(source, monkeypatch, after_backup):
+def test_rechecks_after_fetch_and_before_history_mutation(source: PrRepo, monkeypatch: pytest.MonkeyPatch, after_backup: bool) -> None:
     config, _wid, root, _remote = source
     _squash_merge_upstream(
         Path(config.default_repo.anchor), files={"a.txt": "one\n", "b.txt": "two\n"}, msg="squash",
@@ -168,16 +174,16 @@ def test_rechecks_after_fetch_and_before_history_mutation(source, monkeypatch, a
     before = _git("rev-parse", "HEAD", cwd=root)
     if after_backup:
         real = git_ops.git
-        def run(*argv, **kwargs):
+        def run(*argv: Any, **kwargs: Any) -> Any:
             result = real(*argv, **kwargs)
             if argv[0] == "update-ref" and argv[1].startswith("refs/pre-complete-backups/"):
                 (root / "new.txt").write_text("concurrent edit")
             return result
         monkeypatch.setattr(git_ops, "git", run)
     else:
-        real = git_ops.fetch
-        def fetch(*argv, **kwargs):
-            real(*argv, **kwargs)
+        real_fetch = git_ops.fetch
+        def fetch(*argv: Any, **kwargs: Any) -> None:
+            real_fetch(*argv, **kwargs)
             (root / "new.txt").write_text("concurrent edit")
         monkeypatch.setattr(git_ops, "fetch", fetch)
     code, value = invoke(args)
@@ -190,7 +196,7 @@ def test_rechecks_after_fetch_and_before_history_mutation(source, monkeypatch, a
         assert not _git("for-each-ref", "--format=%(refname)", "refs/pre-complete-backups", cwd=root)
 
 
-def test_owner_conflict_keeps_unknown_result_and_original_tip(source):
+def test_owner_conflict_keeps_unknown_result_and_original_tip(source: PrRepo) -> None:
     config, _wid, root, _remote = source
     _squash_merge_upstream(Path(config.default_repo.anchor), files={"a.txt": "conflict\n"}, msg="conflict")
     before = _git("rev-parse", "HEAD", cwd=root)
@@ -202,7 +208,7 @@ def test_owner_conflict_keeps_unknown_result_and_original_tip(source):
     assert git_ops.is_clean(cwd=root)
 
 
-def test_guarded_backup_failure_remains_unknown_and_never_reconciles(source, monkeypatch):
+def test_guarded_backup_failure_remains_unknown_and_never_reconciles(source: PrRepo, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
     config, _wid, root, _remote = source
@@ -212,7 +218,7 @@ def test_guarded_backup_failure_remains_unknown_and_never_reconciles(source, mon
     args = arguments(source)
     before = _git("rev-parse", "HEAD", cwd=root)
     real = git_ops.git
-    def run(*argv, **kwargs):
+    def run(*argv: Any, **kwargs: Any) -> Any:
         if argv[0] == "update-ref" and argv[1].startswith("refs/pre-complete-backups/"):
             return subprocess.CompletedProcess(argv, 1, "", "ref locked")
         return real(*argv, **kwargs)
@@ -223,7 +229,7 @@ def test_guarded_backup_failure_remains_unknown_and_never_reconciles(source, mon
     assert _git("rev-parse", "HEAD", cwd=root) == before
 
 
-def test_post_backup_validation_timeout_preserves_owner_result_and_recovery(source, monkeypatch):
+def test_post_backup_validation_timeout_preserves_owner_result_and_recovery(source: PrRepo, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
     config, _wid, root, _remote = source
@@ -233,8 +239,8 @@ def test_post_backup_validation_timeout_preserves_owner_result_and_recovery(sour
     args = arguments(source)
     before = _git("rev-parse", "HEAD", cwd=root)
     real = git_ops.git
-    saved = []
-    def run(*argv, **kwargs):
+    saved: list[str] = []
+    def run(*argv: Any, **kwargs: Any) -> Any:
         if saved and argv[:3] == ("--no-replace-objects", "remote", "get-url"):
             raise subprocess.TimeoutExpired(["git", *argv], 30)
         result = real(*argv, **kwargs)
@@ -252,13 +258,14 @@ def test_post_backup_validation_timeout_preserves_owner_result_and_recovery(sour
 
 @pytest.mark.parametrize("operation", ["reset", "rebase"])
 def test_post_mutation_head_failure_retains_accumulated_owner_and_original_tip(
-    source, monkeypatch, operation,
-):
+    source: PrRepo, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
     import subprocess
 
     config, wid, root, _remote = source
     before_pr = _git("rev-parse", "HEAD", cwd=root)
     record = tracking.load_record_by_id(wid)
+    assert record is not None
     record.pr = tracking.PRRecord(
         state="merged", head_sha=before_pr,
         base_sha=_git("merge-base", "origin/master", "HEAD", cwd=root),
@@ -274,8 +281,8 @@ def test_post_mutation_head_failure_retains_accumulated_owner_and_original_tip(
     args = arguments(source)
     before = _git("rev-parse", "HEAD", cwd=root)
     real = git_ops.git
-    mutated = []
-    def run(*argv, **kwargs):
+    mutated: list[tuple[Any, ...]] = []
+    def run(*argv: Any, **kwargs: Any) -> Any:
         if mutated and argv == ("rev-parse", "--short", "HEAD"):
             if operation == "reset":
                 raise OSError("Git launch failed after reset")
@@ -299,8 +306,8 @@ def test_post_mutation_head_failure_retains_accumulated_owner_and_original_tip(
 
 @pytest.mark.parametrize("operation", ["completion", "source-publication"])
 def test_source_operations_share_publication_then_metadata_order_with_recovery(
-    source, monkeypatch, operation,
-):
+    source: PrRepo, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
     from threading import Event
@@ -312,12 +319,12 @@ def test_source_operations_share_publication_then_metadata_order_with_recovery(
     real_publish = pr_publish.publish_lock
     real_metadata = pr_publish.metadata_lock
     @contextmanager
-    def publish(path, **kwargs):
+    def publish(path: str, **kwargs: Any) -> Iterator[None]:
         requested.set()
         with real_publish(path, acquire_timeout=5):
             yield
     monkeypatch.setattr(pr_publish, "publish_lock", publish)
-    def evidence(*args, **kwargs):
+    def evidence(*args: Any, **kwargs: Any) -> Any:
         raise pr_source_publication.SourcePublicationError("bounded publication control")
     monkeypatch.setattr(pr_source_publication, "source_evidence", evidence)
     args = SimpleNamespace(
@@ -325,9 +332,9 @@ def test_source_operations_share_publication_then_metadata_order_with_recovery(
         expected_branch=_git("symbolic-ref", "--short", "HEAD", cwd=root),
         expected_head=_git("rev-parse", "HEAD", cwd=root), dry_run=True, json=True,
     )
-    def action():
+    def action() -> dict[str, Any]:
         if operation == "completion":
-            return pr_source_complete.complete(args)
+            return cast(Callable[[Any], dict[str, Any]], pr_source_complete.complete)(args)
         return pr_source_publication.publish_source(
             wid, config, target_repo=args.repo, workspace=str(root),
             branch="feature/topic", expected_head=args.expected_head,
@@ -347,11 +354,11 @@ def test_source_operations_share_publication_then_metadata_order_with_recovery(
         assert value["error"] == "bounded publication control"
 
 
-def test_legacy_parser_still_runs_without_guards_and_projectless_new_form_is_structured(source, monkeypatch):
+def test_legacy_parser_still_runs_without_guards_and_projectless_new_form_is_structured(source: PrRepo, monkeypatch: pytest.MonkeyPatch) -> None:
     _config, wid, _root, _remote = source
     code, value = invoke(["pr-complete", wid, "--dry-run", "--json"])
     assert code == 0 and "source" not in value and value["success"], json.dumps(value, indent=2)
-    monkeypatch.setattr(cli.front_door_cli, "resolve_invocation_project", lambda *_: False)
+    monkeypatch.setattr(front_door_cli, "resolve_invocation_project", lambda *_: False)
     code, value = invoke(arguments(source))
     assert code == 1 and value["status"] == "not-attempted"
     with pytest.raises(SystemExit) as exc:
@@ -359,7 +366,7 @@ def test_legacy_parser_still_runs_without_guards_and_projectless_new_form_is_str
     assert exc.value.code == 2
 
 
-def process_main(directory, argv, *, prior=False):
+def process_main(directory: str | Path, argv: list[str], *, prior: bool = False) -> int:
     directory = Path(directory)
     config = cfg.Config(
         srcroot=str(directory), machine="test", platform="linux", repo_name="ext",
@@ -372,12 +379,12 @@ def process_main(directory, argv, *, prior=False):
     cfg.load_config = lambda *_a, **_k: config
     cfg.tracking_dir = lambda *_: directory / "manager" / "worktrees"
     cfg.project_dir = lambda *_: directory / "manager"
-    cli.front_door_cli.resolve_invocation_project = lambda *_: True
+    front_door_cli.resolve_invocation_project = lambda *_: True
     if prior:
         from agent_worktrees import pr_author_cli
         assert argv[0] == "pr-author-capabilities", "New syntax reached a prior receiver"
         repository = next(word.partition("=")[2] for word in argv if word.startswith("--repo="))
-        value = pr_author_cli.capabilities(config, repository)
+        value = cast(Callable[[cfg.Config, str], dict[str, Any]], pr_author_cli.capabilities)(config, repository)
         value["operations"].pop("local-source-complete")
         output._json_output(value)
         return 0
@@ -385,7 +392,7 @@ def process_main(directory, argv, *, prior=False):
 
 
 @pytest.mark.parametrize("prior", [False, True])
-def test_real_frontend_and_selected_owner_process_reconcile_actual_source(source, monkeypatch, capsys, prior):
+def test_real_frontend_and_selected_owner_process_reconcile_actual_source(source: PrRepo, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], prior: bool) -> None:
     import agent_worktrees
 
     config, wid, root, _remote = source
@@ -421,7 +428,7 @@ def test_real_frontend_and_selected_owner_process_reconcile_actual_source(source
 
 
 @pytest.mark.parametrize("repository", ["repository", "different"])
-def test_azure_remote_aliases_preserve_repository_binding(source, monkeypatch, repository):
+def test_azure_remote_aliases_preserve_repository_binding(source: PrRepo, monkeypatch: pytest.MonkeyPatch, repository: str) -> None:
     from agent_worktrees import pr_config, pr_source_publication
 
     config, _wid, _root, _remote = source
@@ -438,7 +445,7 @@ def test_azure_remote_aliases_preserve_repository_binding(source, monkeypatch, r
         lambda *a: "https://dev.azure.com/example/project/_git/repository",
     )
     original = pr_source_publication._git
-    def git(root, *argv):
+    def git(root: Path, *argv: str) -> str:
         if argv == ("remote", "get-url", repo.remote):
             return f"git@ssh.dev.azure.com:v3/example/project/{repository}"
         return original(root, *argv)
@@ -450,8 +457,8 @@ def test_azure_remote_aliases_preserve_repository_binding(source, monkeypatch, r
 
 @pytest.mark.parametrize("preview", [False, True])
 def test_completion_fetch_and_merge_hook_leave_linked_publication_unlocked(
-    source, monkeypatch, tmp_path, preview,
-):
+    source: PrRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preview: bool,
+) -> None:
     from concurrent.futures import ThreadPoolExecutor
     import shlex
     from agent_worktrees import pr_publish
@@ -480,8 +487,8 @@ def test_completion_fetch_and_merge_hook_leave_linked_publication_unlocked(
     hook.write_text(f"#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(probe))}\n")
     hook.chmod(0o700)
     original = git_ops.fetch
-    phases = []
-    def acquire():
+    phases: list[str] = []
+    def acquire() -> bool:
         with pr_publish.publish_lock(str(other), acquire_timeout=1), pr_publish.metadata_lock(
             wid, project=config.repo_name, timeout=1,
         ):
@@ -492,7 +499,7 @@ def test_completion_fetch_and_merge_hook_leave_linked_publication_unlocked(
                 assert not acquired, "the admitted source lost completion exclusion"
             return True
     with ThreadPoolExecutor(max_workers=1) as pool:
-        def fetch(*args, **kwargs):
+        def fetch(*args: Any, **kwargs: Any) -> Any:
             assert pool.submit(acquire).result(timeout=3)
             phases.append("fetch")
             return original(*args, **kwargs)
