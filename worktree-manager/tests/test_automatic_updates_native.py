@@ -94,21 +94,15 @@ def desktop_facts(module: ModuleType) -> Any:
     ("input_desktop_matches", False, "desktop-not-interactive"),
     ("same_session", False, "desktop-session-mismatch"),
 ])
-def test_windows_preflight_blocks_before_registry_write(
-    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, field: str, value: bool, code: str,
+def test_windows_desktop_facts_do_not_block_ordinary_preflight(
+    windows_probe: tuple[ModuleType, ModuleType], field: str, value: bool, code: str,
 ) -> None:
     api_module, adapter = windows_probe
     facts = replace(desktop_facts(api_module), **{field: value})
     api = SimpleNamespace(facts=lambda: facts)
-    startup, process = Mock(), Mock()
-    session = adapter.StartupSession(
-        tmp_path, {}, SimpleNamespace(api=api), api=api, autostart=startup, procutil=process,
-    )
-    with pytest.raises(api_module.NativeBlocked, match=code):
-        session.start()
-    assert startup.mock_calls == []
-    assert process.mock_calls == []
-    assert not (tmp_path / "probe/job-spec.json").exists()
+    result = adapter.preflight(api)
+    assert result[field] is value
+    assert adapter.desktop_observable(result) is False
 
 
 def test_windows_valid_desktop_preflight_is_read_only(windows_probe: tuple[ModuleType, ModuleType]) -> None:
@@ -118,20 +112,46 @@ def test_windows_valid_desktop_preflight_is_read_only(windows_probe: tuple[Modul
     assert result["elevated"] is False and result["same_session"] is True
 
 
-def test_windows_missing_inspection_api_blocks_before_registry(
-    windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path,
+def test_windows_missing_desktop_inspection_is_reported_not_required(
+    windows_probe: tuple[ModuleType, ModuleType],
 ) -> None:
     module, adapter = windows_probe
     api = SimpleNamespace(
         facts=Mock(side_effect=module.NativeBlocked("required-win32-api-unavailable", "GetShellWindow")),
     )
-    startup = Mock()
-    session = adapter.StartupSession(
-        tmp_path, {}, SimpleNamespace(api=api), api=api, autostart=startup,
-    )
-    with pytest.raises(module.NativeBlocked, match="GetShellWindow"):
-        session.start()
-    assert startup.mock_calls == []
+    result = adapter.preflight(api)
+    assert "GetShellWindow" in result["desktop_inspection_error"]
+    assert adapter.desktop_observable(result) is False
+
+
+def test_windows_native_preflight_does_not_require_desktop(
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _module, adapter = windows_probe
+    native = importlib.import_module("native")
+    inspection = Mock(side_effect=AssertionError("desktop inspection must not gate native execution"))
+    monkeypatch.setattr(native, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(adapter, "preflight", inspection)
+    native.preflight()
+    inspection.assert_not_called()
+
+
+@pytest.mark.parametrize("unattested", [False, True])
+def test_headless_session_closes_its_owned_inspection_api(
+    windows_probe: tuple[ModuleType, ModuleType], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, unattested: bool,
+) -> None:
+    module, adapter = windows_probe
+    api = SimpleNamespace(close=Mock())
+    monkeypatch.setattr(adapter, "WinAPI", lambda: api)
+    session = adapter.StartupSession(tmp_path, {}, None)
+    session.launch_attempted = unattested
+    if unattested:
+        with pytest.raises(module.NativeBlocked, match="unattested-startup-cleanup"):
+            session.retire()
+    else:
+        session.retire()
+    api.close.assert_called_once_with()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux-compatible import/API-unavailability contract")
@@ -460,8 +480,10 @@ def test_windows_job_helper_executes_exact_command_and_contains_control(
 
 
 @pytest.mark.parametrize("long_command", [False, True])
+@pytest.mark.parametrize("observed", [False, True])
 def test_windows_session_uses_strict_canonical_job_and_health_after_close(
     windows_probe: tuple[ModuleType, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_command: bool,
+    observed: bool,
 ) -> None:
     module, adapter = windows_probe
     root = tmp_path
@@ -507,8 +529,12 @@ def test_windows_session_uses_strict_canonical_job_and_health_after_close(
             pass
 
     monkeypatch.setattr(adapter, "ProcessPin", Pin)
-    api = SimpleNamespace(facts=lambda: desktop_facts(module))
-    observer = SimpleNamespace(api=api, add_pid=Mock())
+    facts = desktop_facts(module) if observed else replace(
+        desktop_facts(module), elevated=True, ssh=True, shell_present=False, foreground_visible=False,
+        station_visible=False, input_desktop_matches=False, same_session=False,
+    )
+    api = SimpleNamespace(facts=lambda: facts)
+    observer = SimpleNamespace(api=api, add_pid=Mock()) if observed else None
     session = adapter.StartupSession(
         root, {"COPILOT_EXTENSIONS_TEST_CONTAINED": "1"}, observer,
         api=api, autostart=startup, procutil=pu,
@@ -517,6 +543,7 @@ def test_windows_session_uses_strict_canonical_job_and_health_after_close(
         if long_command:
             with pytest.raises(module.NativeBlocked, match="autorun-command-too-long"):
                 session.start()
+                assert session.result["preflight"]["elevated"] is (not observed)
             pu.spawn_sync_in_kill_on_close_job.assert_not_called()
             return
         session.start()

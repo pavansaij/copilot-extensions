@@ -174,6 +174,7 @@ def case(
     source: Path, root: Path, manager: dict[str, Any], *, cycles: int,
     failing_standby: bool = False, native_startup: bool = False,
     windows_observer: Any = None,
+    windows_api: Any = None,
     instance_environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     metadata = fixtures.build(source, root, manager, failing_standby=failing_standby)
@@ -198,9 +199,9 @@ def case(
         if native_startup and os.name == "nt":
             from windows_native import StartupSession
 
-            if windows_observer is None:
-                raise RuntimeError("Windows native startup requires continuous desktop observation")
-            windows_session = StartupSession(root, env, windows_observer)
+            windows_session = StartupSession(
+                root, env, windows_observer, **({"api": windows_api} if windows_api is not None else {}),
+            )
             windows_session.start()
         elif native_startup:
             unit = native.unit_name(root)

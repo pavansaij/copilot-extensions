@@ -17,9 +17,6 @@ class UnsupportedNative(RuntimeError):
 
 def preflight() -> None:
     if sys.platform == "win32":
-        from windows_native import preflight as windows_preflight
-
-        windows_preflight()
         return
     if not sys.platform.startswith("linux") or os.getuid() == 0:
         raise UnsupportedNative("native fixture requires an unelevated Linux/WSL user manager")

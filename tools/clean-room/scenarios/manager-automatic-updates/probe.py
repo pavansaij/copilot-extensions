@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -135,24 +136,32 @@ def _qualify_cases(
         ),
         "real_installation_cycles": False, "native_startup": native_startup,
         "windows_window_and_job_lifetime_proved": False,
+        "windows_job_lifetime_proved": False,
         "legacy_controller_handoff_proved": False,
     }
     try:
         if windows_native:
             from windows_api import NativeBlocked, WinAPI, WindowObserver
-            from windows_native import observation_passed
+            from windows_native import desktop_observable, lifetime_passed, observation_passed, preflight
 
             api = WinAPI()
             observer = None
             primary = None
             try:
-                observer = WindowObserver(api)
-                with observer:
+                facts = preflight(api)
+                if desktop_observable(facts):
+                    observer = WindowObserver(api)
+                else:
+                    report["windows_observation"] = {
+                        "status": "unavailable", "passed": None, "measured": False, "facts": facts,
+                    }
+                with observer if observer is not None else nullcontext():
                     if case in ("all", "handover"):
                         report["handover"] = run_selected(
                             report, "handover", workdir / "h", lifecycle.case,
                             source=source, manager=manager, cycles=cycles,
                             native_startup=True, windows_observer=observer,
+                            windows_api=api,
                             instance_environment=instance_environment,
                         )
                     if case in ("all", "failed-successor"):
@@ -160,17 +169,25 @@ def _qualify_cases(
                             report, "failed_successor", workdir / "f", lifecycle.case,
                             source=source, manager=manager, cycles=1,
                             failing_standby=True, native_startup=True, windows_observer=observer,
+                            windows_api=api,
                             instance_environment=instance_environment,
                         )
-                packet = observer.packet()
-                report["windows_observation"] = packet
-                if packet.get("passed") is not True or (
-                    "handover" in report and not observation_passed(packet, report["handover"])
-                ):
-                    raise NativeBlocked(
-                        "windows-observation-failed", "inspect the fixture window/Job observation packet",
-                    )
-                report["windows_window_and_job_lifetime_proved"] = "handover" in report
+                if "handover" in report:
+                    if not lifetime_passed(report["handover"]):
+                        raise NativeBlocked(
+                            "windows-job-lifetime-failed", "inspect the fixture Job/lifecycle packet",
+                        )
+                    report["windows_job_lifetime_proved"] = True
+                if observer is not None:
+                    packet = observer.packet()
+                    report["windows_observation"] = packet
+                    if packet.get("passed") is not True or (
+                        "handover" in report and not observation_passed(packet, report["handover"])
+                    ):
+                        raise NativeBlocked(
+                            "windows-observation-failed", "inspect the fixture window/Job observation packet",
+                        )
+                    report["windows_window_and_job_lifetime_proved"] = "handover" in report
                 report["passed"] = True
                 return report
             except BaseException as exc:

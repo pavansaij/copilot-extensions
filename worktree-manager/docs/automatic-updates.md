@@ -206,8 +206,10 @@ runtime with a failed candidate.
 
 Unit/contained lifecycle tests cover consent, serialization, liveness, deferred
 results, draining and handover failures. Those tests are **not** evidence of
-native unelevated Windows startup, Job escape, zero visible-window/focus changes
-or an advancing real background update. Native qualification must exercise the
+native Windows startup, Job escape, zero visible-window/focus changes
+or an advancing real background update. Native lifecycle qualification supports
+existing elevated/SSH and headless callers; unavailable desktop observations
+remain explicitly unmeasured, not a window/focus pass. Native qualification must exercise the
 exact registered startup command, at least two cycles and worker replacement;
 startup registration and foreground exit zero are not substitutes.
 

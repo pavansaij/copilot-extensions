@@ -75,6 +75,7 @@ def test_invalid_case_combination_refuses_before_preflight_or_preparation(
 def windows_case(
     probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     selected: str, *, quiet: bool = True, lifetime: bool = True,
+    desktop: bool = True,
 ) -> dict[str, Any]:
     windows_api = importlib.import_module("windows_api")
     windows_native = importlib.import_module("windows_native")
@@ -93,9 +94,14 @@ def windows_case(
             return {"passed": quiet}
 
     monkeypatch.setattr(probe, "sys", SimpleNamespace(platform="win32"))
-    monkeypatch.setattr(windows_api, "WinAPI", lambda: SimpleNamespace(close=lambda: None))
+    facts = windows_api.DesktopFacts(
+        elevated=not desktop, ssh=not desktop, shell_present=desktop, foreground_visible=desktop,
+        station_visible=desktop, input_desktop_matches=desktop, same_session=desktop,
+    )
+    monkeypatch.setattr(windows_api, "WinAPI", lambda: SimpleNamespace(close=lambda: None, facts=lambda: facts))
     monkeypatch.setattr(windows_api, "WindowObserver", Observer)
     monkeypatch.setattr(windows_native, "observation_passed", Mock(return_value=lifetime))
+    monkeypatch.setattr(windows_native, "lifetime_passed", Mock(return_value=lifetime))
     return cast(dict[str, Any], probe._qualify_cases(
         tmp_path, tmp_path, {}, cycles=2 if selected == "handover" else 1,
         native_startup=True, instance_environment={}, case=selected,
@@ -133,6 +139,31 @@ def test_windows_handover_keeps_real_cadence_and_lifetime_assessment(
     assert probe.lifecycle.case.call_args.kwargs["native_startup"] is True
 
 
+@pytest.mark.parametrize("lifetime", [False, True])
+def test_windows_headless_handover_keeps_job_proof_without_claiming_ui_coverage(
+    probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lifetime: bool,
+) -> None:
+    windows_api = importlib.import_module("windows_api")
+    windows_native = importlib.import_module("windows_native")
+    if not lifetime:
+        with pytest.raises(windows_api.NativeBlocked, match="windows-job-lifetime-failed"):
+            windows_case(probe, monkeypatch, tmp_path, "handover", desktop=False, lifetime=False)
+        report = json.loads((tmp_path / "qualification.json").read_text())
+        assert report["passed"] is False
+    else:
+        report = windows_case(probe, monkeypatch, tmp_path, "handover", desktop=False)
+        assert report["passed"] is True
+    assert report["windows_job_lifetime_proved"] is lifetime
+    assert report["windows_window_and_job_lifetime_proved"] is False
+    assert report["windows_observation"]["status"] == "unavailable"
+    assert report["windows_observation"]["measured"] is False
+    assert report["windows_observation"]["passed"] is None
+    assert probe.lifecycle.case.call_args.kwargs["windows_observer"] is None
+    assert probe.lifecycle.case.call_args.kwargs["cycles"] == 2
+    windows_native.lifetime_passed.assert_called_once_with(report["handover"])
+    windows_native.observation_passed.assert_not_called()
+
+
 @pytest.mark.parametrize(("selected", "quiet", "lifetime"), [
     ("failed-successor", False, True),
     ("handover", True, False),
@@ -143,7 +174,8 @@ def test_failed_native_observation_cannot_pass_selected_case(
 ) -> None:
     windows_api = importlib.import_module("windows_api")
 
-    with pytest.raises(windows_api.NativeBlocked, match="windows-observation-failed"):
+    expected = "windows-job-lifetime-failed" if not lifetime else "windows-observation-failed"
+    with pytest.raises(windows_api.NativeBlocked, match=expected):
         windows_case(probe, monkeypatch, tmp_path, selected, quiet=quiet, lifetime=lifetime)
     report = json.loads((tmp_path / "qualification.json").read_text())
     assert report["passed"] is False

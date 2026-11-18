@@ -131,9 +131,9 @@ record must match this qualification's owner/run and finite lease. Production
 unit bytes and ownership receipts are unchanged; no drop-in or user-manager
 environment mutation is used.
 
-### Windows native packet from a normal unelevated console
+### Windows native packet, including SSH and headless callers
 
-From the candidate repository, a human can select the two-cycle handover case:
+From the candidate repository, select the two-cycle handover case:
 
 ```powershell
 py -3 tools/clean-room/scenarios/manager-automatic-updates/probe.py qualify --source . --workdir "$env:TEMP\mq-$([Guid]::NewGuid().ToString('N').Substring(0,8))" --case handover --cycles 2 --native-startup
@@ -184,12 +184,15 @@ approvals do not silently select the new case interface.
 
 ### Windows venue and evidence requirements
 
-Do not elevate the console. The adapter checks actual TokenElevation,
-GetShellWindow/GetForegroundWindow, visible WinSta0, matching accessible input
-desktop and user session. Elevated, SSH, service/session-0, locked-desktop or
-inaccessible-desktop venues are blocked before registry writes. Fresh fixture
-roots receive a protected inheritable current-user/Administrators DACL; volumes
-without persistent ACLs are blocked.
+Ordinary Windows qualification does not require an interactive desktop or
+reject an existing elevated/SSH caller. Desktop facts determine optional
+window/focus observation, not permission to run the process-lifetime tests.
+When the current observer cannot cover that caller or desktop, the report marks
+`windows_observation` as unavailable with `measured=false` and `passed=null`;
+it never converts missing coverage into a zero-window pass. The fixture does
+not request elevation, change SSH/UAC settings or switch the caller's identity.
+Fresh fixture roots receive a protected inheritable current-user/Administrators
+DACL; volumes without persistent ACLs are blocked.
 The adapter also checks the real Run command's 260-UTF-16-unit limit. If the
 Python install or temporary-folder path is unusually long, use a shorter
 existing user-writable scratch parent; it never substitutes a junction,
@@ -209,7 +212,8 @@ the Run command. Explicit `--root` remains supported for legacy invocations,
 and source-module execution still requires it. Regenerate prepared payloads
 after this runtime change; older native packets do not certify the new hashes.
 
-An EnumWindows/foreground observer runs continuously across both genuine
+When a compatible interactive desktop is available, an EnumWindows/foreground
+observer runs continuously across both genuine
 300-second-cadence fixture cycles, startup, handover and cleanup. It retains
 creation-identified process handles and a baseline of already-visible windows,
 so the existing terminal is not classified as a newly surfaced window.
@@ -247,10 +251,13 @@ explicitly mark those details pending. Callback cancellation, visibility-query
 failures and checked handle/hook cleanup cannot silently become successful
 observation. Completed packets remain immutable.
 
-Success requires actual two-cycle timing, exact registered-command execution,
+Functional success requires actual two-cycle timing, exact registered-command execution,
 the contained-control Job-closure witness and surviving authenticated worker
-health, plus zero window/focus observations. Neither a one-cycle run nor Linux
-stub tests can mint a Windows-native pass. The output is `qualification.json`
+health. `windows_job_lifetime_proved` records that independent result.
+`windows_window_and_job_lifetime_proved` additionally requires successful
+continuous window/focus observation; it remains false in headless runs.
+Neither a one-cycle run nor Linux stub tests can mint a Windows-native pass.
+The output is `qualification.json`
 in the supplied scratch root; raw fixture logs/specs remain private and should
 not be published wholesale. Cleanup disables/drains only this fixture and
 removes only its exact-owned Run value; no Task Scheduler, UAC, deployed process

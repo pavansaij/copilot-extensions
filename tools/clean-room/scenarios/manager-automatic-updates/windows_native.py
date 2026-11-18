@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+from dataclasses import asdict
 import importlib
 import json
 from pathlib import Path
@@ -14,31 +15,39 @@ from io import BufferedWriter
 from typing import Any
 
 from identity import ProcessPin, until
-from windows_api import NativeBlocked, WinAPI, WindowObserver, require_desktop
+from windows_api import NativeBlocked, WinAPI, WindowObserver
 
 
-def preflight(api: WinAPI | None = None) -> dict[str, bool]:
+def preflight(api: WinAPI | None = None) -> dict[str, Any]:
     owned = api is None
     api = api or WinAPI()
     try:
         try:
-            return require_desktop(api.facts())
-        except (OSError, ValueError, AttributeError, ctypes.ArgumentError) as exc:
-            raise NativeBlocked(
-                "desktop-inspection-failed", f"{type(exc).__name__}: {exc}",
-            ) from exc
+            return asdict(api.facts())
+        except (NativeBlocked, OSError, ValueError, AttributeError, ctypes.ArgumentError) as exc:
+            return {"desktop_inspection_error": f"{type(exc).__name__}: {exc}"}
     finally:
         if owned:
             api.close()
 
 
+def desktop_observable(facts: dict[str, Any]) -> bool:
+    return not facts.get("elevated", True) and not facts.get("ssh", True) and all(
+        facts.get(key) is True for key in (
+            "shell_present", "foreground_visible", "station_visible",
+            "input_desktop_matches", "same_session",
+        )
+    )
+
+
 class StartupSession:
     def __init__(
-        self, root: Path, environment: dict[str, str], observer: WindowObserver,
+        self, root: Path, environment: dict[str, str], observer: WindowObserver | None,
         *, api: WinAPI | None = None, autostart: Any = None, procutil: Any = None,
     ) -> None:
         self.root, self.environment, self.observer = root, dict(environment), observer
-        self.api = api or observer.api
+        self.owns_api = api is None and observer is None
+        self.api = api or (observer.api if observer is not None else WinAPI())
         self.autostart = autostart
         self.procutil = procutil
         self.registered = False
@@ -59,8 +68,6 @@ class StartupSession:
             raise NativeBlocked("preexisting-startup", "fixture registration was not fresh")
         if previous.get("activation") == "blocked":
             raise NativeBlocked("startup-inspection-blocked", str(previous.get("blockers")))
-        # Recheck after preparation, immediately before the only registry-writing call.
-        preflight(self.api)
         registered = module.register_autostart(self.root)
         self.registered = registered.get("registered") is True
         if not self.registered or registered.get("activation") == "blocked":
@@ -100,7 +107,8 @@ class StartupSession:
         self.launch_attempted = True
         if self.job is None:
             raise NativeBlocked("strict-job-unavailable", "canonical primitive did not assign an owned Job")
-        self.observer.add_pid(self.caller.pid)
+        if self.observer is not None:
+            self.observer.add_pid(self.caller.pid)
         code = self.caller.wait(timeout=120)
         result = json.loads((directory / "job-launch.json").read_text(encoding="utf-8"))
         if type(result.get("control_pid")) is int and result["control_pid"] > 0:
@@ -112,7 +120,8 @@ class StartupSession:
             except (OSError, RuntimeError, ValueError) as error:
                 raise NativeBlocked("control-identity-unavailable", str(error)) from error
             self.result["control_identity_verified"] = True
-            self.observer.add_pid(result["control_pid"])
+            if self.observer is not None:
+                self.observer.add_pid(result["control_pid"])
         if code or result.get("error") or result.get("gui_returncode") != 0:
             raise NativeBlocked("registered-command-failed", str(result))
         if result.get("executed_command_sha256") != self.result["registered_command_sha256"]:
@@ -125,7 +134,8 @@ class StartupSession:
             raise NativeBlocked("control-not-live", "contained control exited before Job closure")
 
     def verify_job_close(self, status: dict[str, Any], process: Any) -> dict[str, Any]:
-        self.observer.add_pid(status["pid"])
+        if self.observer is not None:
+            self.observer.add_pid(status["pid"])
         self.readiness_verified = True
         if self.job is None or self.control is None:
             raise NativeBlocked("job-proof-missing", "owned inner Job/control are unavailable")
@@ -169,23 +179,33 @@ class StartupSession:
             self.output = None
 
     def retire(self) -> None:
-        if self.registered:
-            result = self.autostart.remove_autostart(self.root)
-            if result.get("registered") or result.get("activation") == "blocked":
-                raise NativeBlocked("fixture-autorun-retirement-failed", str(result.get("blockers")))
-            self.registered = False
-        if self.launch_attempted and not self.readiness_verified:
-            raise NativeBlocked(
-                "unattested-startup-cleanup",
-                "startup never reached authenticated readiness; retain the fixture for owned-process inspection",
-            )
+        try:
+            if self.registered:
+                result = self.autostart.remove_autostart(self.root)
+                if result.get("registered") or result.get("activation") == "blocked":
+                    raise NativeBlocked("fixture-autorun-retirement-failed", str(result.get("blockers")))
+                self.registered = False
+            if self.launch_attempted and not self.readiness_verified:
+                raise NativeBlocked(
+                    "unattested-startup-cleanup",
+                    "startup never reached authenticated readiness; retain the fixture for owned-process inspection",
+                )
+        finally:
+            if self.owns_api:
+                self.api.close()
 
 
 def observation_passed(packet: dict[str, Any], handover: dict[str, Any]) -> bool:
+    return bool(
+        packet.get("passed") is True and packet.get("observed_seconds", 0) >= 300
+        and lifetime_passed(handover)
+    )
+
+
+def lifetime_passed(handover: dict[str, Any]) -> bool:
     lifetime = handover.get("windows_job_lifetime", {})
     return bool(
-        packet.get("passed") is True and handover.get("observed_cycles", 0) >= 2
-        and packet.get("observed_seconds", 0) >= 300
+        handover.get("observed_cycles", 0) >= 2
         and handover.get("observed_cycle_spacing_seconds", 0) >= 300
         and lifetime.get("inner_job_closed") is True
         and lifetime.get("contained_control_exit_verified") is True
