@@ -2316,7 +2316,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         native_entry.write_text(source.replace(boundary, "\n" + prior_reader + boundary, 1), encoding="utf-8")
     # Fixture-only markers classify a timeout without retrying or extending the child.
     instrumented = native_entry.read_text(encoding="utf-8")
-    for phase_name, statement in (
+    for boundary, statement in (
         ("script-entry", "$ErrorActionPreference = 'Stop'"),
         ("membership-start", "    $admitted = if ($supportsFacts) {"),
         ("membership-complete", "    if (-not $admitted) { exit 0 }"),
@@ -2324,9 +2324,9 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         ("policy-start", "function Invoke-PreToolPolicy([string]$Python, [string]$Payload, [ref]$Diagnostic) {"),
     ):
         assert instrumented.count(statement) == 1
-        marker = f"Write-NativeWriteFixturePhase '{phase_name}'"
+        phase_marker = f"Write-NativeWriteFixturePhase '{boundary}'"
         instrumented = instrumented.replace(
-            statement, statement + "\n" + marker if statement.endswith("{") else marker + "\n" + statement,
+            statement, statement + "\n" + phase_marker if statement.endswith("{") else phase_marker + "\n" + statement,
         )
     native_entry.write_text(instrumented, encoding="utf-8")
     admission = scripts / "managed-session.ps1"
