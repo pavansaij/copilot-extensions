@@ -1,9 +1,13 @@
 """Successful waited updates publish their physical Python, including no-op installs."""
 
+from __future__ import annotations
+
 from contextlib import nullcontext
+import importlib
 from types import SimpleNamespace
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,7 +16,9 @@ from worktree_manager import update_python_path as path_update
 
 
 @pytest.fixture
-def public_python(tmp_path, monkeypatch):
+def public_python(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    # Bind the real platform's IPC backend before presenting Windows to the unit.
+    importlib.import_module("update_driver")
     base = tmp_path / "public python" / "python.exe"
     base.parent.mkdir()
     base.write_bytes(b"fixture; never executed")
@@ -26,12 +32,12 @@ def public_python(tmp_path, monkeypatch):
     registry.CreateKeyEx = lambda *args: nullcontext(key)
     registry.QueryValueEx = lambda *args: state.value
 
-    def write(*args):
+    def write(*args: Any) -> None:
         state.events.append("publish")
         state.writes.append(args)
         state.value = (args[-1], args[-2])
 
-    def notify():
+    def notify() -> None:
         state.notifications += 1
 
     registry.SetValueEx = write
@@ -40,24 +46,29 @@ def public_python(tmp_path, monkeypatch):
     monkeypatch.setattr(path_update, "_notify_environment_change", notify)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "_base_executable", str(base))
-    monkeypatch.setattr(path_update, "os", SimpleNamespace(environ={"PATH": original}))
+    state.environment = {"PATH": original}
+    monkeypatch.setattr(path_update, "os", SimpleNamespace(environ=state.environment))
     state.base, state.original, state.registry = base, original, registry
     state.expected = f"{base.parent};{older};{base.parent}\\;{unrelated}"
     return state
 
 
-def test_waited_update_publishes_physical_base_once_and_keeps_other_entries(public_python, capsys):
+def test_waited_update_publishes_physical_base_once_and_keeps_other_entries(
+    public_python: SimpleNamespace, capsys: pytest.CaptureFixture[str],
+) -> None:
     state = public_python
     assert path_update.finish_update(["update", "--wait"], 0) == 0
     assert state.value == (state.expected, 2)
-    assert path_update.os.environ["PATH"] == state.expected
+    assert state.environment["PATH"] == state.expected
     assert len(state.writes) == state.notifications == 1
     assert "Restart existing terminals" in capsys.readouterr().err
     assert path_update.finish_update(["update"], 0) == 0
     assert len(state.writes) == 1 and state.notifications == 2
 
 
-def test_publication_preserves_distinct_windows_names_with_equal_unicode_casefold(public_python):
+def test_publication_preserves_distinct_windows_names_with_equal_unicode_casefold(
+    public_python: SimpleNamespace,
+) -> None:
     state = public_python
     directory = str(state.base.parent.parent / "Stra\N{LATIN SMALL LETTER SHARP S}e")
     unrelated = str(state.base.parent.parent / "Strasse")
@@ -66,7 +77,9 @@ def test_publication_preserves_distinct_windows_names_with_equal_unicode_casefol
     assert state.value == (directory + ";" + unrelated, 2)
 
 
-def test_publication_keeps_nonidentical_case_aliases_and_existing_empty_entries(public_python):
+def test_publication_keeps_nonidentical_case_aliases_and_existing_empty_entries(
+    public_python: SimpleNamespace,
+) -> None:
     state = public_python
     directory = str(state.base.parent)
     original = directory.upper() + ";;" + directory + "\\"
@@ -75,10 +88,12 @@ def test_publication_keeps_nonidentical_case_aliases_and_existing_empty_entries(
     assert state.value == (directory + ";" + original, 2)
 
 
-def test_retry_notifies_an_already_written_path_without_rewriting(public_python, monkeypatch):
+def test_retry_notifies_an_already_written_path_without_rewriting(
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = public_python
 
-    def notify():
+    def notify() -> None:
         state.notifications += 1
         if state.notifications == 1:
             raise OSError("notification refused")
@@ -86,27 +101,29 @@ def test_retry_notifies_an_already_written_path_without_rewriting(public_python,
     monkeypatch.setattr(path_update, "_notify_environment_change", notify)
     assert path_update.finish_update(["update"], 0) == 1
     assert state.value == (state.expected, 2)
-    assert path_update.os.environ["PATH"] == state.original
+    assert state.environment["PATH"] == state.original
     assert path_update.finish_update(["update"], 0) == 0
     assert state.notifications == 2 and len(state.writes) == 1
-    assert path_update.os.environ["PATH"] == state.expected
+    assert state.environment["PATH"] == state.expected
 
 
 def test_unavailable_publication_lock_is_an_explicit_failure_without_a_write(
-    public_python, monkeypatch, capsys,
-):
-    def unavailable(*args):
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    def unavailable(*args: Any) -> None:
         raise TimeoutError("writer lock unavailable")
 
     monkeypatch.setattr(path_update, "config_write_lock", unavailable)
     assert path_update.finish_update(["update"], 0) == 1
     assert public_python.writes == [] and public_python.notifications == 0
-    assert path_update.os.environ["PATH"] == public_python.original
+    assert public_python.environment["PATH"] == public_python.original
     assert "writer lock unavailable" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("kind", [1, 2], ids=["literal", "expandable"])
-def test_literal_python_directory_is_never_published_as_a_variable_expression(public_python, kind):
+def test_literal_python_directory_is_never_published_as_a_variable_expression(
+    public_python: SimpleNamespace, kind: int,
+) -> None:
     state = public_python
     directory = state.base.parent.parent / "%TEMP%" / "Python311"
     directory.mkdir(parents=True)
@@ -129,26 +146,29 @@ def test_literal_python_directory_is_never_published_as_a_variable_expression(pu
     (["update", "--recover-for-repair"], 0), (["update", "--target=worktree-manager"], 0),
     (["update", "--help"], 0), (["self-install"], 0),
 ])
-def test_noncompleted_or_nonordinary_modes_leave_environment_unchanged(public_python, command, code):
+def test_noncompleted_or_nonordinary_modes_leave_environment_unchanged(
+    public_python: SimpleNamespace, command: list[str], code: int,
+) -> None:
     state = public_python
     assert path_update.finish_update(command, code) == code
     assert state.writes == [] and state.notifications == 0
-    assert path_update.os.environ["PATH"] == state.original
+    assert state.environment["PATH"] == state.original
 
 
 @pytest.mark.parametrize("marker", ["COPILOT_EXTENSIONS_TEST_CONTAINED", "PYTEST_CURRENT_TEST"])
-def test_contained_update_changes_only_process_path(public_python, marker):
+def test_contained_update_changes_only_process_path(public_python: SimpleNamespace, marker: str) -> None:
     state = public_python
-    path_update.os.environ[marker] = "1"
+    state.environment[marker] = "1"
     assert path_update.finish_update(["update"], 0) == 0
-    assert path_update.os.environ["PATH"] == state.expected
+    assert state.environment["PATH"] == state.expected
     assert state.writes == [] and state.notifications == 0
 
 
 @pytest.mark.parametrize("failure", ["unsupported", "missing", "registry-type", "readback", "notify"])
 def test_unqualified_python_or_failed_publication_is_not_update_success(
-    public_python, monkeypatch, capsys, failure,
-):
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], failure: str,
+) -> None:
     state = public_python
     if failure == "unsupported":
         monkeypatch.setattr(sys, "version_info", (3, 9, 0))
@@ -159,17 +179,17 @@ def test_unqualified_python_or_failed_publication_is_not_update_success(
     elif failure == "readback":
         state.registry.SetValueEx = lambda *args: None
     else:
-        def fail():
+        def fail() -> None:
             raise OSError("notification refused")
         monkeypatch.setattr(path_update, "_notify_environment_change", fail)
     assert path_update.finish_update(["update"], 0) == 1
-    assert path_update.os.environ["PATH"] == state.original
+    assert state.environment["PATH"] == state.original
     assert "Python PATH:" in capsys.readouterr().err
 
 
 def test_installed_already_current_frontdoor_publishes_only_after_verified_completion(
-    public_python, monkeypatch, tmp_path,
-):
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     import update_driver
 
     state = public_python
@@ -180,7 +200,7 @@ def test_installed_already_current_frontdoor_publishes_only_after_verified_compl
     monkeypatch.setattr(update_driver, "ensure_worker", lambda *args, **kwargs: None)
     monkeypatch.setattr(update_driver_cli, "source_identity", lambda: {"ref": "already-current"})
 
-    def wait(*args, **kwargs):
+    def wait(*args: Any, **kwargs: Any) -> SimpleNamespace:
         assert state.writes == []
         state.events.append("completed")
         return SimpleNamespace(state="completed", exit_code=0)
@@ -192,7 +212,9 @@ def test_installed_already_current_frontdoor_publishes_only_after_verified_compl
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows bootstrap completion boundary")
-def test_bootstrap_completion_uses_same_publication_after_dispatch(public_python, monkeypatch, tmp_path):
+def test_bootstrap_completion_uses_same_publication_after_dispatch(
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     state = public_python
     installer = self_install._runtime_installer()
     args = SimpleNamespace(
@@ -203,7 +225,7 @@ def test_bootstrap_completion_uses_same_publication_after_dispatch(public_python
     monkeypatch.setattr(installer.runtime, "retention_lease", lambda *args: nullcontext())
     monkeypatch.setattr(update_driver_cli, "handoff_environment", lambda *args: {})
 
-    def dispatch(*args):
+    def dispatch(*args: Any) -> int:
         assert state.writes == []
         state.events.append("completed")
         return 0
@@ -215,7 +237,9 @@ def test_bootstrap_completion_uses_same_publication_after_dispatch(public_python
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows bootstrap completion boundary")
-def test_bootstrap_participant_never_publishes_after_success(public_python, monkeypatch, tmp_path):
+def test_bootstrap_participant_never_publishes_after_success(
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     installer = self_install._runtime_installer()
     args = SimpleNamespace(
         install_only=False, repair_update=False, update_participant=True, root=tmp_path,
@@ -227,7 +251,7 @@ def test_bootstrap_participant_never_publishes_after_success(public_python, monk
     monkeypatch.setattr(installer, "_dispatch_manager", lambda *args, **kwargs: 0)
     assert installer._finish(args, slot, ["update"]) == 0
     assert public_python.writes == [] and public_python.notifications == 0
-    assert path_update.os.environ["PATH"] == public_python.original
+    assert public_python.environment["PATH"] == public_python.original
 
 
 @pytest.mark.parametrize("mode,exit_code,publication_fails", [
@@ -235,13 +259,15 @@ def test_bootstrap_participant_never_publishes_after_success(public_python, monk
     ("auto", 0, False), ("wait", 0, True),
 ])
 def test_bootstrap_observer_owns_publication_only_after_successful_wait(
-    public_python, monkeypatch, tmp_path, mode, exit_code, publication_fails,
-):
+    public_python: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    mode: str, exit_code: int, publication_fails: bool,
+) -> None:
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
-    import bootstrap_inputs
-    import bootstrap_update
-    import runtime_install
+    bootstrap_inputs = importlib.import_module("bootstrap_inputs")
+    bootstrap_update = importlib.import_module("bootstrap_update")
+    runtime_install = importlib.import_module("runtime_install")
     from update_driver import core
+    from update_driver.authority import UpdateAuthority
 
     state = public_python
     if publication_fails:
@@ -257,14 +283,14 @@ def test_bootstrap_observer_owns_publication_only_after_successful_wait(
         id="fixture", log_path=tmp_path / "log", state="pending", exit_code=None, error=None,
     )
 
-    def wait(*args, **kwargs):
+    def wait(*args: Any, **kwargs: Any) -> SimpleNamespace:
         assert mode != "detach" and state.writes == []
         state.events.append("completed")
         return SimpleNamespace(state="completed", exit_code=exit_code)
 
     driver = SimpleNamespace(
         RequestSpec=core.RequestSpec, TrustedRunner=core.TrustedRunner,
-        current_authority=lambda **_kwargs: core.authority.UpdateAuthority(),
+        current_authority=lambda **_kwargs: UpdateAuthority(),
         default_root=lambda: tmp_path, enqueue=lambda *a, **k: request,
         ensure_worker=lambda *a, **k: None, wait=wait,
     )
@@ -279,4 +305,4 @@ def test_bootstrap_observer_owns_publication_only_after_successful_wait(
     assert state.events == (
         [] if mode == "detach" else ["completed", *(["publish"] if publishes else [])]
     )
-    assert path_update.os.environ["PATH"] == (state.expected if publishes else state.original)
+    assert state.environment["PATH"] == (state.expected if publishes else state.original)
