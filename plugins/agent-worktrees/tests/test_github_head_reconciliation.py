@@ -1,0 +1,61 @@
+"""Provider observations are complete, exact and read-only."""
+
+import json
+import subprocess
+
+import pytest
+
+from agent_worktrees.providers import ProviderError, github_head_reconciliation as observation
+from agent_worktrees.providers.github import GitHubProvider
+
+
+@pytest.mark.parametrize("change", ["none", "open", "number", "branch", "head", "fork", "base", "multiple", "malformed"])
+def test_only_single_exact_merged_association_qualifies(monkeypatch, change):
+    row = {
+        "number": 12, "state": "closed", "merged_at": "2026-01-01T00:00:00Z",
+        "head": {"ref": "pr/example", "sha": "abc", "repo": {"full_name": "example/repo"}},
+        "base": {"repo": {"full_name": "example/repo"}},
+    }
+    if change == "open":
+        row.update(state="open", merged_at=None)
+    elif change == "number":
+        row["number"] = 13
+    elif change == "branch":
+        row["head"]["ref"] = "pr/other"
+    elif change == "head":
+        row["head"]["sha"] = "changed"
+    elif change == "fork":
+        row["head"]["repo"]["full_name"] = "fork/repo"
+    elif change == "base":
+        row["base"]["repo"]["full_name"] = "example/other"
+    rows = [row, row] if change == "multiple" else [row]
+    if change == "malformed":
+        rows = [None]
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
+    monkeypatch.setattr(observation, "run_cli", run)
+    result = GitHubProvider().confirm_reconciled_head_v1(
+        "example/repo", "pr/example", number=12, head_sha="abc",
+    )
+    assert result is (change == "none")
+    assert len(calls) == 1
+    assert "state=all" in calls[0] and "per_page=2" in calls[0]
+    assert "head=example:pr/example" in calls[0]
+    assert calls[0][calls[0].index("--method") + 1] == "GET"
+
+
+@pytest.mark.parametrize("payload,code", [("[]", 0), ("[{}]", 0), ("{}", 0), ("null", 0), ("", 1), ("", 0)])
+def test_absence_is_not_an_unavailable_or_nonempty_response(monkeypatch, payload, code):
+    monkeypatch.setattr(
+        observation, "run_cli",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, code, payload, "unavailable"),
+    )
+    if payload not in ("[]", "[{}]"):
+        with pytest.raises(ProviderError):
+            GitHubProvider().confirm_reconciled_head_v1("example/repo", "pr/example")
+    else:
+        assert GitHubProvider().confirm_reconciled_head_v1(
+            "example/repo", "pr/example",
+        ) is (payload == "[]")

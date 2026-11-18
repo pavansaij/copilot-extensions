@@ -72,7 +72,10 @@ def pr_content_landed(
     decide. The provider is asked for the PR's base only when the default
     branch doesn't already hold the work, and each tracked PR is read from it at
     most once per call."""
-    from . import finalize_open_pr_gate as fopg
+    from . import finalize_open_pr_gate as fopg, pr_creation_reconcile
+    error = pr_creation_reconcile.finalization_error(record, repo)
+    if error:
+        return False, error, []
     with fopg.one_read_per_pr():
         return _pr_content_landed(record, repo, content_ref, cwd=cwd)
 

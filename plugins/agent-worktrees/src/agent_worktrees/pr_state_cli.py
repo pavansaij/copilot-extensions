@@ -75,7 +75,10 @@ def add_parsers(sub) -> None:
         "--pr", type=int, default=None, help="Select which tracked PR to abandon by number"
     )
     selector.add_argument("--creation", default=None, help="Cancel one unpublished local attempt by immutable PR ID")
+    selector.add_argument("--reconcile-creation", help="Retire one owner-stamped legacy publishing attempt by immutable PR ID; publication outcome remains unknown")
     p.add_argument("--expected-revision", type=int, default=None, help="Exact creation revision being confirmed")
+    p.add_argument("--expected-head", help="Full source HEAD explicitly confirmed for legacy reconciliation")
+    p.add_argument("--merged-pr", type=int, help="Legacy reconciliation only: existing exact-head merged association")
     p.add_argument(
         "--reason", default=None, required=True,
         help="Why this PR is being abandoned (required on every call, not "
@@ -279,18 +282,34 @@ def cmd_pr_abandon(args: argparse.Namespace) -> int:
         return output._json_error(msg) if use_json else (output.err(msg) or 1)
     worktree_id = worktree_identity._resolve_worktree_id(worktree_id)
 
-    result = pr_ops.abandon_pr(
-        worktree_id,
-        config,
-        target_repo=getattr(args, "repo", None),
-        pr_number=getattr(args, "pr", None),
-        reason=getattr(args, "reason", None) or "",
-        confirm=getattr(args, "confirm", False),
-        creation_id=getattr(args, "creation", None),
-        expected_revision=getattr(args, "expected_revision", None),
-    )
+    if getattr(args, "reconcile_creation", None) is not None:
+        from .pr_creation_reconcile import reconcile
+        if getattr(args, "repo", None):
+            return output._json_error("Legacy reconciliation does not accept a target override.") if use_json else (
+                output.err("Legacy reconciliation does not accept a target override.") or 1
+            )
+        result = reconcile(
+            worktree_id, config, creation_id=args.reconcile_creation,
+            expected_revision=args.expected_revision, expected_head=args.expected_head or "",
+            merged_pr=args.merged_pr, reason=args.reason, confirm=args.confirm,
+        )
+    elif getattr(args, "expected_head", None) is not None or getattr(args, "merged_pr", None) is not None:
+        result = {"success": False, "error": "--expected-head and --merged-pr require --reconcile-creation."}
+    else:
+        result = pr_ops.abandon_pr(
+            worktree_id,
+            config,
+            target_repo=getattr(args, "repo", None),
+            pr_number=getattr(args, "pr", None),
+            reason=getattr(args, "reason", None) or "",
+            confirm=getattr(args, "confirm", False),
+            creation_id=getattr(args, "creation", None),
+            expected_revision=getattr(args, "expected_revision", None),
+        )
     if use_json:
         output._json_output(result)
+    elif result.get("creation_reconciled"):
+        output.ok("Legacy local attempt retired; publication outcome remains unknown. No provider PR or claim changed.")
     elif result.get("creation_cancelled"):
         output.ok(
             f"Local PR creation {result['pr_id']} cancelled; no provider PR was closed. "

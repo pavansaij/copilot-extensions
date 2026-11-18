@@ -90,6 +90,10 @@ class GitHubProvider:
         from .github_head_absence import confirm
         return confirm(self, repo, head, api_base=api_base, token=token)
 
+    def confirm_reconciled_head_v1(self, repo, head, *, number=None, head_sha="", api_base="", token=None) -> bool:
+        from .github_head_reconciliation import confirm
+        return confirm(self, repo, head, number=number, head_sha=head_sha, api_base=api_base, token=token)
+
     def authority_endpoint(self, api_base: str = "") -> str:
         configured = (api_base or "").strip()
         if configured:

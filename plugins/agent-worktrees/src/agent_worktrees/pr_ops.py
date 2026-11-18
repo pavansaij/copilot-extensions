@@ -2196,8 +2196,10 @@ def pr_status(worktree_id: str, *, all_prs: bool = False,
         except pr_authority.PublicationAuthorityBusy as exc:
             reconciliation = exc.status_result()
     active = record.active_pr()
+    from . import pr_creation_reconcile
     result = {**base, "has_pr": active is not None, "pr_count": len(record.prs),
-              "creation_cancellation_contract": pr_creation_state.CONTRACT}
+              "creation_cancellation_contract": pr_creation_state.CONTRACT,
+              "creation_reconciliation_contract": pr_creation_reconcile.CONTRACT}
     if active is not None:
         result.update(_pr_to_dict(active))
         rec = _pull_forward_recommendation(record, active, config, live=live)

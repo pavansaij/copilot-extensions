@@ -197,6 +197,12 @@ an exact, durably qualified reservation and retains ambiguous legacy attempts.
 Never edit the ledger or close a numbered association merely to satisfy
 publication ownership.
 
+The [legacy creation reconciliation owner](pr-creation-reconciliation.md)
+can explicitly retire one owner-stamped publishing reservation without a
+prepared first-push source. It preserves the unknown transport outcome and
+original identity, checks current provider/ref/source proof under the existing
+publication/finalization fences, and never invents provider closure or merge.
+
 ### Transport boundaries
 
 The clone-wide `agent-worktrees-publish.lock` protects shared remote
