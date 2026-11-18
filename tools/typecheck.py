@@ -36,7 +36,7 @@ from tools.typecheck_bootstrap_views import (  # noqa: E402
     INPUTS as BOOTSTRAP_INPUTS, bootstrap_view, require_bootstrap_version,
     SELECTOR_INPUTS, powershell_selector_view, posix_selector_view,
 )
-from tools.typecheck_new_code import select_new_code  # noqa: E402
+from tools.typecheck_new_code import git_environment as git_environment, select_new_code  # noqa: E402
 from tools.typecheck_programs import Program, ProgramError, ProgramInputs, independent_programs  # noqa: E402
 from installer_dependency_policy import DependencyPolicyError, run_uv_install  # noqa: E402
 from single_instance_lease import AlreadyRunningError  # noqa: E402
@@ -470,20 +470,6 @@ def _run(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -> s
         argv, cwd=root, env=env, capture_output=True, text=True, encoding="utf-8",
         errors="strict", timeout=120, creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
     )
-
-
-def git_environment() -> dict[str, str]:
-    """Keep repository selectors from redirecting inventory or change comparison."""
-    selectors = {
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    }
-    env = {
-        key: value for key, value in os.environ.items()
-        if key.upper() not in selectors and not key.upper().startswith("GIT_CONFIG")
-    }
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0")
-    return env
 
 
 def changed_paths(root: Path, base: str, head: str | None = None) -> tuple[str, ...]:

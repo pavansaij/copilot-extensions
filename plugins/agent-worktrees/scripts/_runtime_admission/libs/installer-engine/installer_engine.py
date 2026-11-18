@@ -23,7 +23,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, TypedDict, cast
 
-import tomllib
+tomllib = importlib.import_module("tomllib")
 import versioned_runtime as runtime
 import versioned_runtime_source as runtime_source
 from installer_dependency_policy import (
@@ -606,13 +606,13 @@ def _construct(
             raise RuntimeError("Application staging did not produce its slot-local interpreter")
         inputs.wheel_inputs.verify()
         return python
-    environment = slot / ".venv" if nested_environment else slot
-    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    environment_root = slot / ".venv" if nested_environment else slot
+    python = environment_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     native_python = Path(_native_retained_path(python))
-    configuration = Path(_native_retained_path(environment / "pyvenv.cfg"))
+    configuration = Path(_native_retained_path(environment_root / "pyvenv.cfg"))
     if not refresh or not native_python.is_file() or not configuration.is_file():
         _child(
-            [str(base_python), "-I", "-m", "venv", "--without-pip", "--copies", _native_retained_path(environment)],
+            [str(base_python), "-I", "-m", "venv", "--without-pip", "--copies", _native_retained_path(environment_root)],
             inputs=inputs, descriptor=descriptor, timeout=timeout, candidate=slot,
             delays=(0.75, 0.75) if os.name == "nt" else (),
             transient=r"Access is denied|failed to persist temporary file",
@@ -931,6 +931,7 @@ def _candidate(
                         for name in (
                             "runtime_launcher.py", "versioned_runtime.py",
                             "versioned_runtime_leases.py", "versioned_runtime_source.py",
+                            "versioned_runtime_identity.py", "versioned_runtime_fingerprint.py",
                             "versioned_runtime_construction.py",
                             "versioned_runtime_publication.py",
                             "versioned_runtime_cache.py", "daemon_instance_runtime.pyz",
