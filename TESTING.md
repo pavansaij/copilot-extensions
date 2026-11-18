@@ -825,6 +825,15 @@ production decoder and verifies structured-value and malformed-input parity.
 Child/item/group limits remain 10/30/300 seconds. These finite synthetic
 measurements are not installed, composed-hook or productive-throughput proof.
 
+`tests/test_pre_tool_bounded_reads.py` adds actual opened-file size, growth,
+short-read, atomic-replacement and decoding controls on both Windows engines.
+Its `registered_pretool_reader_compatibility` adapter reuses every original
+entry case with the contained runner's dependency-ready interpreter; it does
+not select an ambient Python or change the original fixture's assertions.
+The existing prepared-membership job selects only its focused `pretool_bounded`
+reader controls alongside the original registered portfolio. Local validation
+can select the complete adapter explicitly under the same 10/30/300 limits.
+
 For prepared Windows file-local writes, `prepared-membership-native.yml` runs
 `registered_file_local_write_reuses_original_guard_facts` from
 `tests/test_managed_session.py` in disjoint safe/admission and fallback packets.

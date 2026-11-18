@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import time
+from types import ModuleType
+from typing import Any, Callable, NoReturn
 
 import pytest
 from agent_procutil import no_window_kwargs
@@ -169,7 +171,7 @@ function Test-NativePreToolRead([object]$Payload, [bool]$PreparedMembership = $f
 """
 
 
-def native_write_fixture_launch(stderr):
+def native_write_fixture_launch(stderr: bytes) -> tuple[dict[str, int] | None, bytes]:
     launch, errors = None, []
     fields = ("birth_filetime", "entry_utc_ms", "qpc", "frequency", "cpu_ticks")
     for line in stderr.splitlines(keepends=True):
@@ -189,7 +191,7 @@ def native_write_fixture_launch(stderr):
     return launch, b"".join(errors)
 
 
-def native_write_fixture_stderr(stderr):
+def native_write_fixture_stderr(stderr: bytes) -> tuple[str, bytes]:
     phases, errors = [], []
     for line in stderr.splitlines(keepends=True):
         match = re.fullmatch(
@@ -216,7 +218,7 @@ def native_write_fixture_stderr(stderr):
     return "\n".join(phases), b"".join(errors)
 
 
-def instrument_prepared_admission(source):
+def instrument_prepared_admission(source: str) -> str:
     prepared_function = "function Test-PreparedManagedWorktreesSession {"
     prefix, prepared = source.split(prepared_function, 1)
     opened = "        $openedLength = $stream.Length"
@@ -258,9 +260,9 @@ def instrument_prepared_admission(source):
 
 
 def qualify_complete_native_entry(
-    scripts, entry, executable, event, env, workspace, capsys, *, literal_read=False,
-    command_key="command", literal_batch=False, argument_read=False,
-):
+    scripts: Path, entry: str, executable: str, event: dict[str, Any], env: dict[str, str], workspace: Path, capsys: pytest.CaptureFixture[str], *, literal_read: bool=False,
+    command_key: str="command", literal_batch: bool=False, argument_read: bool=False,
+) -> None:
     entry_started = time.monotonic()
     shell_event = "toolCalls" not in event and event.get("toolName") == "powershell"
     shell_proof = shell_event or literal_batch
@@ -333,7 +335,7 @@ function Read-PreToolJson([string]$Path, [int]$Limit) {
     return FixtureOriginalReadPreToolJson $Path $Limit
 }
 function FixtureOriginalReadPreToolJson""", 1)
-        statement = '            $text = [IO.File]::ReadAllText($path, $utf8).Replace("`r`n", "`n")'
+        statement = '            $text = (Read-PreToolText $path 131072 $true).Replace("`r`n", "`n")'
         assert source.count(statement) == 1
         instrumented["pre-tool-hook.ps1"] = source.replace(
             statement, "            $global:batchSourceReads++\n" + statement, 1,
@@ -358,7 +360,7 @@ function FixtureOriginalReadPreToolJson""", 1)
             ),
         ]}
 
-    def report_progress(variant, state):
+    def report_progress(variant: str, state: str) -> None:
         with capsys.disabled():
             print(json.dumps({"complete_native_entry_progress": {
                 "shell": str(executable), "cell": bool(env.get("COPILOT_EXTENSIONS_CONTEXT")),
@@ -532,7 +534,7 @@ function FixtureOriginalReadPreToolJson""", 1)
 
 
 @pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
-def test_native_write_fixture_stderr_preserves_errors(newline):
+def test_native_write_fixture_stderr_preserves_errors(newline: bytes) -> None:
     phase = b"NATIVE_WRITE_FIXTURE_PHASE 123 command-entry" + newline
     before = b"NATIVE_WRITE_FIXTURE_PHASE 124 json-web-load cpu_ticks=250000 utility=1 web=0" + newline
     after = b"NATIVE_WRITE_FIXTURE_PHASE 126 json-resolver-type cpu_ticks=500000 utility=1 web=1" + newline
@@ -560,7 +562,7 @@ def test_native_write_fixture_stderr_preserves_errors(newline):
 
 
 @pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
-def test_native_write_fixture_launch_preserves_phases_and_errors(newline):
+def test_native_write_fixture_launch_preserves_phases_and_errors(newline: bytes) -> None:
     launch = (
         b"NATIVE_WRITE_FIXTURE_LAUNCH birth_filetime=134125000000000000"
         b" entry_utc_ms=1768026400000 qpc=123456 frequency=10000000 cpu_ticks=0" + newline
@@ -581,7 +583,7 @@ def test_native_write_fixture_launch_preserves_phases_and_errors(newline):
 
 
 @pytest.mark.parametrize("change", ["duplicate", "frequency", "overflow", "truncated"])
-def test_native_write_fixture_launch_rejects_malformed_or_duplicate_frame(change):
+def test_native_write_fixture_launch_rejects_malformed_or_duplicate_frame(change: str) -> None:
     launch = (
         b"NATIVE_WRITE_FIXTURE_LAUNCH birth_filetime=134125000000000000"
         b" entry_utc_ms=1768026400000 qpc=123456 frequency=10000000 cpu_ticks=1\n"
@@ -600,7 +602,7 @@ def test_native_write_fixture_launch_rejects_malformed_or_duplicate_frame(change
 @pytest.mark.effect("process")
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows launch observation")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
-def test_native_write_fixture_launch_observes_native_birth(tmp_path, shell):
+def test_native_write_fixture_launch_observes_native_birth(tmp_path: Path, shell: str) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -622,7 +624,7 @@ def test_native_write_fixture_launch_observes_native_birth(tmp_path, shell):
 @pytest.mark.effect("process")
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows timeout diagnostics")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
-def test_native_write_fixture_stderr_survives_timeout(tmp_path, shell):
+def test_native_write_fixture_stderr_survives_timeout(tmp_path: Path, shell: str) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -648,8 +650,9 @@ def test_native_write_fixture_stderr_survives_timeout(tmp_path, shell):
     assert captured.value.stdout == b""
 
 
-def load(name):
+def load(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(f"admission_test_{name}", SCRIPTS / f"{name}.py")
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -657,7 +660,7 @@ def load(name):
 
 
 @pytest.mark.parametrize("kind", ["preToolUse", "postToolUse", "sessionStart", "sessionEnd"])
-def test_unmanaged_event_never_dispatches(kind, tmp_path, monkeypatch, capsys):
+def test_unmanaged_event_never_dispatches(kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     client = load("hook_client")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -671,7 +674,7 @@ def test_unmanaged_event_never_dispatches(kind, tmp_path, monkeypatch, capsys):
         "toolArgs": {"path": "source.py"},
     })))
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: Any, **kwargs: Any) -> NoReturn:
         pytest.fail("unmanaged event reached policy or lifecycle activation")
 
     monkeypatch.setattr(client, "decide", forbidden)
@@ -684,7 +687,7 @@ def test_unmanaged_event_never_dispatches(kind, tmp_path, monkeypatch, capsys):
     assert not (tmp_path / ".copilot").exists()
 
 
-def fixture_project(tmp_path):
+def fixture_project(tmp_path: Path) -> tuple[Path, Path]:
     anchor = tmp_path / "anchor-\u00e9"
     git_dir = anchor / ".git"
     for folder in ("objects", "refs"):
@@ -700,7 +703,7 @@ def fixture_project(tmp_path):
     return anchor, registry
 
 
-def fixture_linked_worktree(tmp_path, anchor, *, relative=False):
+def fixture_linked_worktree(tmp_path: Path, anchor: Path, *, relative: bool=False) -> tuple[Path, Path]:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     admin = anchor / ".git" / "worktrees" / "example-worktree"
@@ -715,14 +718,14 @@ def fixture_linked_worktree(tmp_path, anchor, *, relative=False):
     return worktree, admin
 
 
-def fixture_checkout(path):
+def fixture_checkout(path: Path) -> Path:
     for folder in ("objects", "refs"):
         (path / ".git" / folder).mkdir(parents=True)
     (path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     return path
 
 
-def test_positive_membership_is_cached_but_registration_alone_is_not(tmp_path, monkeypatch):
+def test_positive_membership_is_cached_but_registration_alone_is_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     anchor, registry = fixture_project(tmp_path)
@@ -740,7 +743,7 @@ def test_positive_membership_is_cached_but_registration_alone_is_not(tmp_path, m
     assert not module.admitted({**payload, "sessionId": "../bad"}, home=tmp_path)
 
 
-def test_native_session_association_avoids_warm_git_traversal(tmp_path, monkeypatch):
+def test_native_session_association_avoids_warm_git_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     anchor, registry = fixture_project(tmp_path)
@@ -765,7 +768,7 @@ def test_native_session_association_avoids_warm_git_traversal(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("relative", [False, True])
-def test_linked_worktree_requires_the_adopted_common_directory(tmp_path, monkeypatch, relative):
+def test_linked_worktree_requires_the_adopted_common_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     anchor, _ = fixture_project(tmp_path)
@@ -779,7 +782,7 @@ def test_linked_worktree_requires_the_adopted_common_directory(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("tags", ["[selected, local]", "\n    - selected\n    - local"])
-def test_generated_registry_admission_needs_no_yaml_install(tmp_path, monkeypatch, tags):
+def test_generated_registry_admission_needs_no_yaml_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tags: str) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setitem(sys.modules, "yaml", None)
@@ -798,8 +801,8 @@ def test_generated_registry_admission_needs_no_yaml_install(tmp_path, monkeypatc
 ])
 @pytest.mark.parametrize("implementation", ["standalone", "runtime"])
 def test_admission_shares_kernel_and_container_platform_detection(
-    tmp_path, monkeypatch, substrate, implementation,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, substrate: str, implementation: str,
+) -> None:
     from types import SimpleNamespace
 
     module = load("managed_session")
@@ -819,13 +822,13 @@ def test_admission_shares_kernel_and_container_platform_detection(
     ))
 
     class Probe:
-        def __init__(self, path):
+        def __init__(self, path: str | Path) -> None:
             self.path = path
 
-        def is_file(self):
+        def is_file(self) -> bool:
             return False
 
-        def read_text(self, **kwargs):
+        def read_text(self, **kwargs: Any) -> str:
             if self.path == "/proc/1/cgroup":
                 return (
                     "0::/docker/example" if substrate == "container" else "0::/user.slice"
@@ -854,7 +857,7 @@ def test_admission_shares_kernel_and_container_platform_detection(
         assert module.admitted({"sessionId": "classified", "cwd": str(anchor)}, home=tmp_path)
 
 
-def test_sdk_cell_cache_revokes_changed_resolver_ownership(tmp_path, monkeypatch):
+def test_sdk_cell_cache_revokes_changed_resolver_ownership(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
     import test_registry_paths as fixtures
 
@@ -910,7 +913,7 @@ for (const path of [namespace, manifest]) {
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_linked_admission_cache_tracks_failed_owner_and_common_metadata(tmp_path):
+def test_linked_admission_cache_tracks_failed_owner_and_common_metadata(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")
@@ -966,7 +969,7 @@ assert.equal(await check(input), false, "anchor HEAD remains a live ownership in
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_cache_is_scoped_to_session_and_selected_registry(tmp_path, monkeypatch):
+def test_cache_is_scoped_to_session_and_selected_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     anchor, registry = fixture_project(tmp_path)
@@ -986,7 +989,7 @@ def test_cache_is_scoped_to_session_and_selected_registry(tmp_path, monkeypatch)
     assert (registry / "cache").is_dir()
 
 
-def test_persistent_membership_does_not_cross_execution_platforms(tmp_path, monkeypatch):
+def test_persistent_membership_does_not_cross_execution_platforms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     anchor, registry = fixture_project(tmp_path)
@@ -1003,7 +1006,7 @@ def test_persistent_membership_does_not_cross_execution_platforms(tmp_path, monk
 
 
 @pytest.mark.parametrize("syntax", ["json", "yaml", "quoted-yaml"])
-def test_machine_anchor_override_precedes_registered_anchor_and_invalidates_reuse(tmp_path, monkeypatch, syntax):
+def test_machine_anchor_override_precedes_registered_anchor_and_invalidates_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, syntax: str) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setitem(sys.modules, "yaml", None)
@@ -1033,8 +1036,8 @@ def test_machine_anchor_override_precedes_registered_anchor_and_invalidates_reus
 @pytest.mark.parametrize("quote", ['"', "'"])
 @pytest.mark.parametrize("indent", [2, 4])
 def test_commented_yaml_ownership_paths_preserve_quotes_hashes_and_indentation(
-    tmp_path, monkeypatch, source, quote, indent,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, quote: str, indent: int,
+) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setitem(sys.modules, "yaml", None)
@@ -1055,7 +1058,7 @@ def test_commented_yaml_ownership_paths_preserve_quotes_hashes_and_indentation(
     assert module.admitted({**payload, "cwd": str(current)}, home=tmp_path)
 
 
-def test_quoted_yaml_platform_override_precedes_execution_platform_without_yaml(tmp_path, monkeypatch):
+def test_quoted_yaml_platform_override_precedes_execution_platform_without_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setitem(sys.modules, "yaml", None)
@@ -1074,7 +1077,7 @@ def test_quoted_yaml_platform_override_precedes_execution_platform_without_yaml(
 
 
 @pytest.mark.parametrize("scalar", ["null", "~", "Null", "NULL", "", "json"])
-def test_per_anchor_null_clears_to_registry_without_yaml(tmp_path, monkeypatch, scalar):
+def test_per_anchor_null_clears_to_registry_without_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scalar: str) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setitem(sys.modules, "yaml", None)
@@ -1088,7 +1091,7 @@ def test_per_anchor_null_clears_to_registry_without_yaml(tmp_path, monkeypatch, 
     assert module.admitted({"sessionId": "cleared", "cwd": str(anchor)}, home=tmp_path)
 
 
-def test_wsl_does_not_inherit_linux_only_registration(tmp_path, monkeypatch):
+def test_wsl_does_not_inherit_linux_only_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     monkeypatch.setattr(module, "detect_platform", lambda: "wsl")
@@ -1107,8 +1110,8 @@ def test_wsl_does_not_inherit_linux_only_registration(tmp_path, monkeypatch):
 @pytest.mark.parametrize("without_yaml", [False, True])
 @pytest.mark.parametrize("platform", ["windows", "linux", "wsl"])
 def test_stale_project_anchor_never_supplies_registry_ownership(
-    tmp_path, monkeypatch, without_yaml, platform,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, without_yaml: bool, platform: str,
+) -> None:
     module = load("managed_session")
     monkeypatch.delenv("COPILOT_EXTENSIONS_CONTEXT", raising=False)
     if without_yaml:
@@ -1131,7 +1134,7 @@ def test_stale_project_anchor_never_supplies_registry_ownership(
     assert not module.admitted(payload, home=tmp_path)
 
 
-def test_namespaced_anchor_override_uses_canonical_repository_identity(tmp_path, monkeypatch):
+def test_namespaced_anchor_override_uses_canonical_repository_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
     import test_registry_paths as fixtures
     from agent_worktrees import project_state
@@ -1174,7 +1177,7 @@ def test_namespaced_anchor_override_uses_canonical_repository_identity(tmp_path,
     assert module.admitted(payload)
 
 
-def test_sdk_rechecks_new_ownership_fragments_and_explicit_precedence(tmp_path):
+def test_sdk_rechecks_new_ownership_fragments_and_explicit_precedence(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")
@@ -1215,7 +1218,7 @@ assert.equal(await check(input), true);
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_real_installation_cells_do_not_share_admission_or_fall_back(tmp_path, monkeypatch):
+def test_real_installation_cells_do_not_share_admission_or_fall_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
     import test_registry_paths as fixtures
 
@@ -1265,7 +1268,7 @@ def test_real_installation_cells_do_not_share_admission_or_fall_back(tmp_path, m
     assert not (legacy / "cache").exists()
 
 
-def environment(home, anchor):
+def environment(home: Path, anchor: Path) -> dict[str, str]:
     env = dict(os.environ)
     for key in list(env):
         if key.startswith(("COPILOT_", "AGENT_WORKTREES_", "WORKTREE_")):
@@ -1281,7 +1284,7 @@ def environment(home, anchor):
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows prepared membership")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
 @pytest.mark.parametrize("linked", [False, True])
-def test_prepared_native_membership_reuses_original_association(tmp_path, monkeypatch, capsys, shell, linked):
+def test_prepared_native_membership_reuses_original_association(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], shell: str, linked: bool) -> None:
     executable = shutil.which(shell)
     if not executable:
         if os.environ.get("AGENT_WORKTREES_REQUIRE_NATIVE_MEMBERSHIP") == "1":
@@ -1343,7 +1346,7 @@ def test_prepared_native_membership_reuses_original_association(tmp_path, monkey
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows registered pre-tool consumer")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
 @pytest.mark.parametrize("case", ["read", "write", "revoked", "cold-read", "cold-write", "read-batch"])
-def test_registered_pre_tool_entry_reuses_prepared_membership(tmp_path, monkeypatch, shell, case):
+def test_registered_pre_tool_entry_reuses_prepared_membership(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, case: str) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -1419,7 +1422,7 @@ def test_registered_pre_tool_entry_reuses_prepared_membership(tmp_path, monkeypa
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows registered prepared-cell pre-tool consumer")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
 @pytest.mark.parametrize("case", ["view", "rg", "glob", "guard-drift", "incomplete", "receipt", "write", "read-batch"])
-def test_registered_prepared_cell_membership_read_requires_complete_native_proof(tmp_path, monkeypatch, shell, case):
+def test_registered_prepared_cell_membership_read_requires_complete_native_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, case: str) -> None:
     from types import SimpleNamespace
     import test_registry_paths as fixtures
 
@@ -1618,7 +1621,7 @@ def test_registered_prepared_cell_membership_read_requires_complete_native_proof
     "patch-field-oversized", "patch-union-overflow", "patch-json-nonobject",
     "cell-patch-union", "cell-patch-protected-move", "cell-patch-real-policy",
 ])
-def test_registered_file_local_write_reuses_original_guard_facts(tmp_path, monkeypatch, capsys, shell, case):
+def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], shell: str, case: str) -> None:
     from agent_worktrees import guarded_anchors
 
     cell = case.startswith("cell-")
@@ -1736,7 +1739,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path, monke
     if case.startswith("patch-"):
         event["toolName"] = "apply_patch"
 
-        def patch(*headers):
+        def patch(*headers: str) -> str:
             return "*** Begin Patch\n" + "".join(f"*** {header}\n" for header in headers) + "*** End Patch\n"
 
         args = {"input": patch("Update File: source-\u00e9.py")}
@@ -2459,8 +2462,8 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path, monke
     "receipt-payload-fallback", "receipt-plugin-fallback", "receipt-namespace-fallback",
 ])
 def test_prepared_cell_membership_reuses_only_complete_current_owner_observation(
-    tmp_path, monkeypatch, shell, case,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, case: str,
+) -> None:
     from types import SimpleNamespace
     import test_registry_paths as fixtures
 
@@ -2534,7 +2537,7 @@ def test_prepared_cell_membership_reuses_only_complete_current_owner_observation
     resolution_errors = []
     original_resolve = module.resolve_registry_context
 
-    def resolve_with_diagnostics(*args, **kwargs):
+    def resolve_with_diagnostics(*args: Any, **kwargs: Any) -> Any:
         try:
             return original_resolve(*args, **kwargs)
         except Exception as error:
@@ -2676,8 +2679,8 @@ def test_prepared_cell_membership_reuses_only_complete_current_owner_observation
     "session-array", "cwd-array", "working-directory-array",
 ])
 def test_prepared_native_membership_rejects_changed_or_unavailable_inputs(
-    tmp_path, monkeypatch, shell, damage,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, damage: str,
+) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -2747,7 +2750,7 @@ def test_prepared_native_membership_rejects_changed_or_unavailable_inputs(
 
 @pytest.mark.parametrize("kind", ["preToolUse", "postToolUse", "sessionStart", "sessionEnd"])
 @pytest.mark.parametrize("repo_class", ["worktree", "reference", None])
-def test_real_python_entry_is_inert_for_registry_only_repo(kind, repo_class, tmp_path):
+def test_real_python_entry_is_inert_for_registry_only_repo(kind: str, repo_class: str, tmp_path: Path) -> None:
     anchor, registry = fixture_project(tmp_path)
     (registry / "projects.yaml").write_text("projects: {}\n")
     repos = registry / "repos.yaml"
@@ -2770,7 +2773,7 @@ def test_real_python_entry_is_inert_for_registry_only_repo(kind, repo_class, tmp
     assert not (registry / "cache").exists()
 
 
-def test_real_managed_pretool_preserves_anchor_write_protection(tmp_path):
+def test_real_managed_pretool_preserves_anchor_write_protection(tmp_path: Path) -> None:
     anchor, _ = fixture_project(tmp_path)
     result = subprocess.run(
         [sys.executable, "-B", str(SCRIPTS / "hook_client.py"), "preToolUse"],
@@ -2786,7 +2789,7 @@ def test_real_managed_pretool_preserves_anchor_write_protection(tmp_path):
 
 @pytest.mark.parametrize("entry", ["python", "powershell"])
 @pytest.mark.timeout(120)
-def test_native_batch_entry_and_live_scoped_grants(tmp_path, record_testsuite_property, entry):
+def test_native_batch_entry_and_live_scoped_grants(tmp_path: Path, record_testsuite_property: Callable[[str, object], None], entry: str) -> None:
     anchor, registry = fixture_project(tmp_path)
     caller, _ = fixture_linked_worktree(tmp_path, anchor)
     reader = load("guarded_anchor_map")
@@ -2840,7 +2843,7 @@ def test_native_batch_entry_and_live_scoped_grants(tmp_path, record_testsuite_pr
     ]}
     timings = []
 
-    def invoke(value):
+    def invoke(value: dict[str, Any]) -> Any:
         started = time.monotonic()
         result = subprocess.run(
             command, input=json.dumps(value), text=True, capture_output=True,
@@ -2880,7 +2883,7 @@ def test_native_batch_entry_and_live_scoped_grants(tmp_path, record_testsuite_pr
     record_testsuite_property(f"native_batch_inventory:{entry}", len(rows))
 
 
-def test_invalid_query_does_not_reuse_ambient_admission(tmp_path):
+def test_invalid_query_does_not_reuse_ambient_admission(tmp_path: Path) -> None:
     anchor, registry = fixture_project(tmp_path)
     env = environment(tmp_path, anchor)
     env["COPILOT_AGENT_SESSION_ID"] = "managed"
@@ -2894,7 +2897,7 @@ def test_invalid_query_does_not_reuse_ambient_admission(tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["preToolUse", "postToolUse", "sessionStart", "sessionEnd"])
-def test_real_powershell_hook_does_not_activate_unmanaged_repo(kind, tmp_path):
+def test_real_powershell_hook_does_not_activate_unmanaged_repo(kind: str, tmp_path: Path) -> None:
     powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
     if not powershell:
         pytest.skip("PowerShell is unavailable")
@@ -2917,7 +2920,7 @@ def test_real_powershell_hook_does_not_activate_unmanaged_repo(kind, tmp_path):
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe", "bash"])
 @pytest.mark.parametrize("case", ["unmanaged", "managed", "missing-helper"])
-def test_session_start_gates_older_client_before_fallback(shell, case, tmp_path, native_bash):
+def test_session_start_gates_older_client_before_fallback(shell: str, case: str, tmp_path: Path, native_bash: str) -> None:
     executable = native_bash if shell == "bash" else shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -2960,7 +2963,7 @@ def test_session_start_gates_older_client_before_fallback(shell, case, tmp_path,
 
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
-def test_session_start_forwards_unicode_membership_query(shell, tmp_path):
+def test_session_start_forwards_unicode_membership_query(shell: str, tmp_path: Path) -> None:
     powershell = shutil.which(shell)
     if not powershell:
         pytest.skip("PowerShell is unavailable")
@@ -2992,7 +2995,7 @@ def test_session_start_forwards_unicode_membership_query(shell, tmp_path):
     {"__type": None, "Name": 1, "name": 2, "": 3},
     {"__type": "opaque", "Name": 1, "name": 2, "": 3},
 ])
-def test_real_admission_accepts_opaque_json_keys(tmp_path, shell, opaque):
+def test_real_admission_accepts_opaque_json_keys(tmp_path: Path, shell: str, opaque: str) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -3026,7 +3029,7 @@ def test_real_admission_accepts_opaque_json_keys(tmp_path, shell, opaque):
 @pytest.mark.parametrize("shell,old_engine", [
     ("pwsh", False), ("pwsh", True), ("powershell.exe", False),
 ])
-def test_admission_query_serialization_cold_fallback(tmp_path, shell, old_engine, capsys):
+def test_admission_query_serialization_cold_fallback(tmp_path: Path, shell: str, old_engine: bool, capsys: pytest.CaptureFixture[str]) -> None:
     executable = shutil.which(shell)
     if not executable:
         pytest.skip(f"{shell} is unavailable")
@@ -3144,8 +3147,8 @@ if ($null -ne $script:queryFrame) { throw 'Warm admission serialized another que
 @pytest.mark.parametrize("consumer", ["powershell.exe", "pwsh", "node"])
 @pytest.mark.parametrize("cell", [False, True])
 def test_admission_resolves_healthy_selected_runtime(
-    tmp_path, monkeypatch, record_testsuite_property, consumer, cell,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_testsuite_property: Callable[[str, object], None], consumer: str, cell: bool,
+) -> None:
     import venv
     from types import SimpleNamespace
     import test_registry_paths as fixtures
@@ -3276,7 +3279,7 @@ assert.equal(calls, 4,
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Git Bash consumer on Windows")
-def test_posix_session_end_uses_runtime_without_path_python(tmp_path, native_bash):
+def test_posix_session_end_uses_runtime_without_path_python(tmp_path: Path, native_bash: str) -> None:
     import venv
 
     anchor, runtime = fixture_project(tmp_path)
@@ -3313,7 +3316,7 @@ def test_posix_session_end_uses_runtime_without_path_python(tmp_path, native_bas
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Native POSIX extension process")
-def test_posix_extension_resolves_runtime_without_path_python(tmp_path):
+def test_posix_extension_resolves_runtime_without_path_python(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")
@@ -3353,7 +3356,7 @@ assert.equal(await check({sessionId: "runtime-only", workingDirectory}), true);
 
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
-def test_real_powershell_managed_pretool_preserves_protection(tmp_path, record_testsuite_property, shell):
+def test_real_powershell_managed_pretool_preserves_protection(tmp_path: Path, record_testsuite_property: Callable[[str, object], None], shell: str) -> None:
     powershell = shutil.which(shell)
     if not powershell:
         pytest.skip("PowerShell is unavailable")
@@ -3417,7 +3420,7 @@ def test_real_powershell_managed_pretool_preserves_protection(tmp_path, record_t
     record_testsuite_property(f"foreground_transitions:{shell}", len(foreground))
 
 
-def test_extension_is_inert_until_adoption_and_stops_after_revocation(tmp_path):
+def test_extension_is_inert_until_adoption_and_stops_after_revocation(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")
@@ -3506,7 +3509,7 @@ assert.equal(policies, 1);
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows venv redirector lifetime")
-def test_admission_timeout_retires_the_actual_python_worker(tmp_path):
+def test_admission_timeout_retires_the_actual_python_worker(tmp_path: Path) -> None:
     from test_hook_policy_lifetime import _pin_descendant
 
     node = shutil.which("node")
@@ -3568,7 +3571,7 @@ console.log(JSON.stringify(await check({sessionId: "timeout-fixture", workingDir
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows application execution aliases")
-def test_extension_admission_never_launches_windowsapps_aliases(tmp_path):
+def test_extension_admission_never_launches_windowsapps_aliases(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")

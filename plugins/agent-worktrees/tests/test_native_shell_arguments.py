@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,7 +17,7 @@ from test_managed_session import SCRIPTS, environment, load, no_window_kwargs
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows regex and shared proof consumers")
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
-def test_native_shell_arguments_preserve_original_predicates_and_rollback(tmp_path, shell):
+def test_native_shell_arguments_preserve_original_predicates_and_rollback(tmp_path: Path, shell: str) -> None:
     executable = shutil.which(shell)
     if not executable:
         if os.environ.get("AGENT_WORKTREES_REQUIRE_NATIVE_MEMBERSHIP") == "1":
@@ -65,7 +67,7 @@ def test_native_shell_arguments_preserve_original_predicates_and_rollback(tmp_pa
     ]
     cases = []
 
-    def add(args, expected, *, key="toolArgs", declaration=None, prior=False, batch=None):
+    def add(args: Any, expected: bool, *, key: str="toolArgs", declaration: dict[str, Any] | None=None, prior: bool=False, batch: object=None) -> None:
         event = {"toolName": "powershell", key: args}
         if key == "toolArgs":
             event["tool_input"] = {"command": "Set-Content ignored"}
@@ -151,6 +153,11 @@ def test_native_shell_arguments_preserve_original_predicates_and_rollback(tmp_pa
         "                if (-not $heads.Contains($command)) { return $false }\n"
         "            }\n"
     ) + source[end:]
+    prior = prior.replace(
+        '            $text = (Read-PreToolText $path 131072 $true).Replace("`r`n", "`n")',
+        '            $text = [IO.File]::ReadAllText($path, $utf8).Replace("`r`n", "`n")',
+        1,
+    )
     previous_function = prior[prior.index("function Test-NativePreToolSources("):
                               prior.index("function Get-NativePreToolBatch(")]
     assert hashlib.sha256(previous_function.encode()).hexdigest() == (

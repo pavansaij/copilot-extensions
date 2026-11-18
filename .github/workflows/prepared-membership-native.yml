@@ -17,6 +17,7 @@ on:
       - "plugins/agent-worktrees/tests/test_managed_session.py"
       - "plugins/agent-worktrees/tests/test_native_shell_arguments.py"
       - "plugins/agent-worktrees/tests/test_native_pre_policy.py"
+      - "plugins/agent-worktrees/tests/test_pre_tool_bounded_reads.py"
       - "plugins/agent-worktrees/scripts/hook-facts.ps1"
       - "plugins/agent-worktrees/scripts/post-tool-hook.ps1"
       - "plugins/agent-worktrees/tests/test_post_tool_shell.py"
@@ -131,7 +132,8 @@ jobs:
           python tools/run-plugin-tests.py agent-worktrees
           --test-file tests/test_managed_session.py
           --test-file tests/test_post_tool_shell.py
-          -k "prepared_cell_membership or registered_prepared_cell or send_debits_allocation or prepared_json_engine_retains_shell_semantics"
+          --test-file tests/test_pre_tool_bounded_reads.py
+          -k "prepared_cell_membership or registered_prepared_cell or send_debits_allocation or prepared_json_engine_retains_shell_semantics or pretool_bounded"
           --allow-explicit-tiers --test-timeout 30 --timeout 300
       - name: Qualify mixed-batch registered entries and original receiver
         env:
