@@ -1687,7 +1687,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
     elif case == "structured":
         event["toolArgs"]["edits"] = [{"path": "other.py"}]
     elif case.startswith("structured-"):
-        args = event["toolArgs"]
+        args: dict[str, Any] = event["toolArgs"]
         args["edits"] = [{"path": "other.py"}]
         if case in {"structured-files", "structured-changes"}:
             args[case.removeprefix("structured-")] = args.pop("edits")
@@ -1748,7 +1748,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         def patch(*headers: str) -> str:
             return "*** Begin Patch\n" + "".join(f"*** {header}\n" for header in headers) + "*** End Patch\n"
 
-        args: dict[str, Any] = {"input": patch("Update File: source-\u00e9.py")}
+        args = {"input": patch("Update File: source-\u00e9.py")}
         event["toolArgs"] = args
         if case in {"patch-patch", "patch-command"}:
             args[case.removeprefix("patch-")] = args.pop("input")
@@ -1825,8 +1825,8 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         elif case == "patch-anchor":
             args["input"] = patch(f"Update File: {anchor / 'source.py'}")
     if case.startswith("batch-"):
-        first = {"name": "create", "args": event["toolArgs"]}
-        last = {"name": "edit", "args": {"path": "second.py"}}
+        first: dict[str, Any] = {"name": "create", "args": event["toolArgs"]}
+        last: dict[str, Any] = {"name": "edit", "args": {"path": "second.py"}}
         event["toolCalls"] = [first, {"name": "view", "args": {"path": "read.txt"}}, last]
         # A top-level read must not hide a later write or supply its arguments.
         event["toolName"] = "view"
@@ -2316,7 +2316,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         native_entry.write_text(source.replace(boundary, "\n" + prior_reader + boundary, 1), encoding="utf-8")
     # Fixture-only markers classify a timeout without retrying or extending the child.
     instrumented = native_entry.read_text(encoding="utf-8")
-    for boundary, statement in (
+    for phase_name, statement in (
         ("script-entry", "$ErrorActionPreference = 'Stop'"),
         ("membership-start", "    $admitted = if ($supportsFacts) {"),
         ("membership-complete", "    if (-not $admitted) { exit 0 }"),
@@ -2324,7 +2324,7 @@ def test_registered_file_local_write_reuses_original_guard_facts(tmp_path: Path,
         ("policy-start", "function Invoke-PreToolPolicy([string]$Python, [string]$Payload, [ref]$Diagnostic) {"),
     ):
         assert instrumented.count(statement) == 1
-        marker = f"Write-NativeWriteFixturePhase '{boundary}'"
+        marker = f"Write-NativeWriteFixturePhase '{phase_name}'"
         instrumented = instrumented.replace(
             statement, statement + "\n" + marker if statement.endswith("{") else marker + "\n" + statement,
         )
