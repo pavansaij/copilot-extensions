@@ -10,14 +10,17 @@ from agent_worktrees.providers import ProviderError, github_head_reconciliation 
 from agent_worktrees.providers.github import GitHubProvider
 
 
-@pytest.mark.parametrize("change", ["none", "open", "number", "branch", "head", "fork", "base", "multiple", "malformed"])
+@pytest.mark.parametrize("change", ["none", "case", "open", "number", "branch", "head", "fork", "base", "multiple", "malformed"])
 def test_only_single_exact_merged_association_qualifies(monkeypatch: pytest.MonkeyPatch, change: str) -> None:
     row: dict[str, Any] = {
         "number": 12, "state": "closed", "merged_at": "2026-01-01T00:00:00Z",
         "head": {"ref": "pr/example", "sha": "abc", "repo": {"full_name": "example/repo"}},
         "base": {"repo": {"full_name": "example/repo"}},
     }
-    if change == "open":
+    if change == "case":
+        row["head"]["repo"]["full_name"] = "Example/REPO"
+        row["base"]["repo"]["full_name"] = "EXAMPLE/Repo"
+    elif change == "open":
         row.update(state="open", merged_at=None)
     elif change == "number":
         row["number"] = 13
@@ -40,7 +43,7 @@ def test_only_single_exact_merged_association_qualifies(monkeypatch: pytest.Monk
     result = GitHubProvider().confirm_reconciled_head_v1(
         "example/repo", "pr/example", number=12, head_sha="abc",
     )
-    assert result is (change == "none")
+    assert result is (change in ("none", "case"))
     assert len(calls) == 1
     assert "state=all" in calls[0] and "per_page=2" in calls[0]
     assert "head=example:pr/example" in calls[0]
@@ -60,3 +63,24 @@ def test_absence_is_not_an_unavailable_or_nonempty_response(monkeypatch: pytest.
         assert GitHubProvider().confirm_reconciled_head_v1(
             "example/repo", "pr/example",
         ) is (payload == "[]")
+
+
+@pytest.mark.parametrize("host,endpoint", [
+    ("github.com", "https://api.github.com"),
+    ("forge.example.com", "https://forge.example.com/api/v3"),
+])
+def test_absolute_endpoint_and_selected_credentials_cannot_be_redirected(
+    monkeypatch: pytest.MonkeyPatch, host: str, endpoint: str,
+) -> None:
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert f"{endpoint}/repos/example/repo/pulls" in argv
+        assert argv[argv.index("--hostname") + 1] == host
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+            assert kwargs["env"][key] == "selected-test-credential"
+        return subprocess.CompletedProcess(argv, 0, "[]", "")
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.setenv(key, "unrelated-test-credential")
+    monkeypatch.setattr(observation, "run_cli", run)
+    assert GitHubProvider().confirm_reconciled_head_v1(
+        "example/repo", "pr/example", api_base=host, token="selected-test-credential",
+    )

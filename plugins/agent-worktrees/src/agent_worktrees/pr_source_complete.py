@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from argparse import Namespace
 from pathlib import Path
 import re
 import subprocess
+from typing import Any
 
-from . import config as cfg, git_ops, output, pr_complete, pr_config, pr_publish
+from . import config as cfg, git_ops, output, pr_authority, pr_complete, pr_config, pr_publish
 from . import pr_source_publication, tracking, worktree_identity
 from .git_repository_environment import repository_identity_scope
 from .providers.pr_source import same_repository
@@ -15,7 +17,10 @@ from .providers.pr_source import same_repository
 SCHEMA = "agent-worktrees.pr-source-complete"
 
 
-def outcome(args, *, source=None, status="not-attempted", result=None, error=""):
+def outcome(
+    args: Namespace, *, source: dict[str, str] | None = None, status: str = "not-attempted",
+    result: dict[str, Any] | None = None, error: str = "",
+) -> dict[str, Any]:
     value = {
         "schema": SCHEMA, "version": 1, "repo": args.repo,
         "source": source, "dry_run": bool(args.dry_run),
@@ -28,7 +33,7 @@ def outcome(args, *, source=None, status="not-attempted", result=None, error="")
     return value
 
 
-def _admit(args):
+def _admit(args: Namespace) -> tuple[cfg.Config, tuple[dict[str, str], str, cfg.RepoConfig, str]]:
     if (
         not isinstance(args.repo, str) or not args.repo.strip()
         or not isinstance(args.expected_head, str)
@@ -87,7 +92,7 @@ def _admit(args):
     return config, binding
 
 
-def complete(args):
+def complete(args: Namespace) -> dict[str, Any]:
     with repository_identity_scope():
         return _complete(args)
 
@@ -103,13 +108,13 @@ def _source_lock(root: str) -> Iterator[None]:
             pr_publish._unlock_publish_file(handle)
 
 
-def _complete(args):
+def _complete(args: Namespace) -> dict[str, Any]:
     source, result, invoked = None, None, False
     try:
         config, binding = _admit(args)
         source, root, _repo, _remote_url = binding
-        with _source_lock(root):
-            def recheck():
+        with pr_authority.publication_lifecycle(config, worktree_id=source["worktree_id"]), _source_lock(root):
+            def recheck() -> None:
                 with pr_publish.publish_lock(root), pr_publish.metadata_lock(
                     source["worktree_id"], project=config.repo_name,
                 ):
@@ -138,12 +143,12 @@ def _complete(args):
         )
 
 
-def emit(args, result):
+def emit(args: Namespace, result: dict[str, Any]) -> int:
     output._json_output(result) if args.json else print(result)
     return 0 if result["ok"] else 1
 
 
-def project_unavailable(argv, message):
+def project_unavailable(argv: list[str], message: str) -> int:
     import argparse
     from . import pr_state_cli
 

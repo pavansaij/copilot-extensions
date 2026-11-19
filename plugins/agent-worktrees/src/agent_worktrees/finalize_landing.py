@@ -35,6 +35,9 @@ def tracks_pr(record: WorktreeRecord | None, repo: RepoConfig) -> bool:
     from a hand-made branch) is still a PR: its merge and its base are read from the
     provider, and the content is the live checkout. Shared by ``finalize`` and
     ``--explain-landing`` so the two never disagree."""
+    from . import pr_creation_reconcile
+    if record and any(pr_creation_reconcile.requires_qualification(p) for p in record.prs):
+        return True
     pr = getattr(record, "pr", None) if record else None
     return bool(getattr(getattr(repo, "pr", None), "enabled", False) and pr
                 and ((getattr(pr, "branch", "") or "").strip() or getattr(pr, "number", None)))

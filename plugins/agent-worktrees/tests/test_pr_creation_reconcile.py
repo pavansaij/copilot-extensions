@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 import pytest
+from machine_transport import detect_platform
 
 from agent_worktrees import __main__ as cli
 from agent_worktrees import config as cfg
@@ -17,6 +18,21 @@ from test_pr_creation_cancel import reservation as reservation, source_snapshot
 pytestmark = pytest.mark.contract("agent_worktrees.pr_publish.publication_state")
 Legacy = tuple[cfg.Config, str, Path, Path, Path, tracking.WorktreeRecord, Any]
 snapshot = cast(Callable[[Path], tuple[str, bytes, str, str]], source_snapshot)
+
+
+@pytest.fixture
+def pr_repo(
+    pr_repo: tuple[cfg.Config, str, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[cfg.Config, str, Path, Path]:
+    config, wid, wt, remote = pr_repo
+    project = tmp_path / "project"
+    project.mkdir()
+    ledger = project / "worktrees"
+    cfg.tracking_dir().rename(ledger)
+    monkeypatch.setattr(cfg, "project_dir", lambda name=None: project)
+    monkeypatch.setattr(cfg, "tracking_dir", lambda name=None: ledger)
+    config = replace(config, platform=detect_platform())
+    return config, wid, wt, remote
 
 
 def selected(record: tracking.WorktreeRecord) -> tracking.PRRecord:
@@ -84,12 +100,183 @@ def test_actual_deadlock_and_owner_cli_retirement(legacy: Legacy, monkeypatch: p
     assert selected(current).attribution_mode == selected(record).attribution_mode
     assert snapshot(wt) == before
     assert finalize_open_pr_gate.assert_no_live_pr(current, config, wid)
-    assert finalize._pr_finalize_precondition(
-        current, config.default_repo, str(wt), config.default_repo.anchor,
-    )[0]
+
+
+def test_confirmed_retry_keeps_original_receipt(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    assert invoke(legacy, capfd)["success"]
+    path = legacy[4]
     saved = path.read_bytes()
     assert invoke(legacy, capfd)["already_reconciled"]
     assert path.read_bytes() == saved
+
+
+def test_hidden_untracked_work_is_not_clean_source(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    wt, path = legacy[2], legacy[4]
+    (wt / "untracked.txt").write_text("retain useful work\n")
+    git_ops.git("config", "status.showUntrackedFiles", "no", cwd=str(wt))
+    before = path.read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "Dirty source" in result["error"]
+    assert path.read_bytes() == before and (wt / "untracked.txt").exists()
+
+
+def test_ignored_dirty_submodule_is_not_clean_source(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    wt, remote, path = legacy[2], legacy[3], legacy[4]
+    git_ops.git("-c", "protocol.file.allow=always", "submodule", "add", str(remote), "module", cwd=str(wt))
+    git_ops.git("commit", "-am", "Add already-landed submodule", cwd=str(wt))
+    git_ops.git("push", "origin", "HEAD:master", cwd=str(wt))
+    git_ops.git("config", "submodule.module.ignore", "all", cwd=str(wt))
+    module = wt / "module"
+    tracked = git_ops.git("ls-files", cwd=str(module)).stdout.splitlines()[0]
+    (module / tracked).write_text("uncommitted submodule work\n")
+    assert not git_ops.git("status", "--porcelain", cwd=str(wt)).stdout.strip()
+    before = path.read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "Dirty source" in result["error"]
+    assert path.read_bytes() == before
+
+
+def test_replace_refs_cannot_make_unlanded_source_an_ancestor(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    wt, path = legacy[2], legacy[4]
+    git_ops.git("commit", "--allow-empty", "-m", "Unlanded source", cwd=str(wt))
+    head = git_ops.git("rev-parse", "HEAD", cwd=str(wt)).stdout.strip()
+    upstream = git_ops.git("rev-parse", "origin/master", cwd=str(wt)).stdout.strip()
+    tree = git_ops.git("rev-parse", "origin/master^{tree}", cwd=str(wt)).stdout.strip()
+    replacement = git_ops.git("commit-tree", tree, "-p", head, "-m", "Replacement", cwd=str(wt)).stdout.strip()
+    git_ops.git("replace", upstream, replacement, cwd=str(wt))
+    assert git_ops.git("merge-base", "--is-ancestor", "HEAD", "origin/master", cwd=str(wt)).returncode == 0
+    before = path.read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "Every owned local" in result["error"]
+    assert path.read_bytes() == before
+
+
+def test_unrelated_clone_cannot_stand_in_for_recorded_checkout(legacy: Legacy, tmp_path: Path) -> None:
+    from agent_worktrees import pr_creation_reconcile as recovery
+    config, _wid, wt, remote, _path, record, _provider = legacy
+    shadow = tmp_path / "shadow"
+    git_ops.git("clone", "--quiet", str(remote), str(shadow), cwd=str(wt))
+    git_ops.git("checkout", "-qb", record.branch, cwd=str(shadow))
+    with pytest.raises(ValueError, match="configured anchor"):
+        recovery._source(replace(record, worktree_path=str(shadow)), config.default_repo)
+
+
+@pytest.mark.parametrize("snapshot_number", [1, 2])
+def test_native_execution_space_refusal_preserves_attempt(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], snapshot_number: int,
+) -> None:
+    from agent_worktrees import execution_spaces
+    real = execution_spaces.require_record_mutation
+    calls = 0
+    def check(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == snapshot_number:
+            raise execution_spaces.ExecutionSpaceError("foreign receiving subject")
+        real(*args, **kwargs)
+    monkeypatch.setattr(execution_spaces, "require_record_mutation", check)
+    before = legacy[4].read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "foreign receiving subject" in result["error"]
+    assert calls == snapshot_number and legacy[4].read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["none", "contract", "all-recovery", "all-creation"])
+def test_retirement_requires_qualification_even_when_pr_mode_is_disabled(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], damage: str,
+) -> None:
+    from agent_worktrees import finalize_landing, pr_reconcile
+    config, wid, wt, _remote, path, _record, provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    current = tracking.load_record(path)
+    retired = selected(current)
+    if damage == "contract":
+        del retired.creation["recovery_contract"]
+    elif damage == "all-recovery":
+        retired.creation = {k: v for k, v in retired.creation.items() if not k.startswith("recovery_")}
+    elif damage == "all-creation":
+        retired.creation = {}
+    tracking.save_record(current)
+    provider.find_pull_by_head = lambda *a, **k: pytest.fail("retired attempt was healed")
+    assert not pr_reconcile.heal_numberless_active_pr(current, config)
+    if damage != "none":
+        current.prs.append(tracking.PRRecord(
+            pr_id="other-attempt", branch="pr/other", state="merged", number=12,
+            repo="example/repo", provider="github",
+        ))
+        tracking.save_record(current)
+    repo = replace(config.default_repo, pr=replace(config.default_repo.pr, enabled=False))
+    assert finalize_landing.tracks_pr(current, repo)
+    monkeypatch.setattr(finalize_open_pr_gate, "pull_for", lambda *a: None)
+    landed, reason = finalize._pr_finalize_precondition(current, repo, str(wt), repo.anchor)
+    assert landed is (damage == "none"), reason
+    if damage != "none":
+        assert reason and "retirement proof is invalid" in reason
+    assert current.worktree_id == wid
+
+
+def test_provider_probe_does_not_hold_clone_or_installation_locks(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_worktrees import pr_authority, pr_publish
+    config, wid, wt, _remote, _path, _record, provider = legacy
+    def acquire() -> bool:
+        with pr_authority.guard(timeout=0), pr_publish.publish_lock(str(wt), acquire_timeout=1), \
+                pr_publish.metadata_lock(wid, project=config.repo_name, timeout=1):
+            return True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def observe(*args: Any, **kwargs: Any) -> bool:
+            return pool.submit(acquire).result(timeout=3)
+        provider.confirm_reconciled_head_v1 = observe
+        result = invoke(legacy, capfd)
+    assert result["success"], result
+
+
+def test_active_record_publisher_refuses_retirement_without_waiting_on_its_authority(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from threading import Event, Thread
+    from agent_worktrees import pr_authority
+    entered, release = Event(), Event()
+    def publisher() -> None:
+        with pr_authority.guard():
+            entered.set()
+            assert release.wait(5)
+    thread = Thread(target=publisher)
+    def observe(*args: Any, **kwargs: Any) -> bool:
+        thread.start()
+        assert entered.wait(2)
+        return True
+    legacy[6].confirm_reconciled_head_v1 = observe
+    before = legacy[4].read_bytes()
+    try:
+        result = invoke(legacy, capfd)
+    finally:
+        release.set()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert not result["success"] and "authority" in result["error"]
+    assert legacy[4].read_bytes() == before
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_native_finalization_cannot_disable_retirement_qualification(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str], valid: bool,
+) -> None:
+    config, wid, wt, _remote, path, _record, provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    record = tracking.load_record(path)
+    if not valid:
+        del selected(record).creation["recovery_contract"]
+        tracking.save_record(record)
+    provider.find_pull_by_head = lambda *a, **k: pytest.fail("retired attempt was adopted by heuristic healing")
+    config = replace(config, repos={config.repo_name: replace(
+        config.default_repo, pr=replace(config.default_repo.pr, enabled=False),
+    )})
+    result = finalize.validate_and_finalize(wid, config)
+    assert result is valid
+    assert wt.exists() is not valid
 
 
 @pytest.mark.parametrize("change", ["source", "branch", "revision", "owner", "binding", "prepared", "legacy", "expected-head"])

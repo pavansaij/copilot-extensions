@@ -12,6 +12,7 @@ import pytest
 from agent_worktrees import __main__ as cli
 from agent_worktrees import config as cfg, front_door_cli, git_ops, output, pr_complete, tracking
 from test_pr_complete import _git, _squash_merge_upstream
+from test_pr_source_publication import publication as publication, publish as source_publish
 
 PrRepo = tuple[cfg.Config, str, Path, Path]
 
@@ -44,6 +45,78 @@ def invoke(argv: list[str]) -> tuple[int, dict[str, Any]]:
         code = cli.main(argv)
     response: dict[str, Any] = json.loads(capture.getvalue())
     return code, response
+
+
+def test_opt_in_lifecycle_reentrancy_keeps_default_and_peer_exclusion(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_worktrees import worktree_lifecycle
+    path = tmp_path / "source.yaml"
+    def blocked() -> None:
+        with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
+            pytest.fail("another thread entered the same lifecycle")
+    with ThreadPoolExecutor(max_workers=1) as pool, worktree_lifecycle.guard(path):
+        with worktree_lifecycle.guard(path, timeout=0, reentrant=True):
+            pool.submit(blocked).result(timeout=3)
+        with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
+            pytest.fail("default guard became reentrant")
+        pool.submit(blocked).result(timeout=3)
+    with worktree_lifecycle.guard(path, timeout=0):
+        pass
+
+
+def test_guarded_publisher_keeps_checkout_lifecycle_through_probes_and_transport(
+    publication: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_worktrees import pr_source_publication, worktree_lifecycle
+    from agent_worktrees.git_push_transport import observed_ref
+    path = cfg.tracking_dir() / f"{publication.wid}.yaml"
+    original_probe, original_push = observed_ref, git_ops.push
+    phases: list[str] = []
+    def blocked() -> None:
+        with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
+            pytest.fail("publisher lost lifecycle exclusion")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def probe(*args: Any, **kwargs: Any) -> Any:
+            pool.submit(blocked).result(timeout=3)
+            phases.append("probe")
+            return original_probe(*args, **kwargs)
+        def push(*args: Any, **kwargs: Any) -> Any:
+            pool.submit(blocked).result(timeout=3)
+            phases.append("transport")
+            return original_push(*args, **kwargs)
+        monkeypatch.setattr(pr_source_publication, "observed_ref", probe)
+        monkeypatch.setattr(git_ops, "push", push)
+        result = cast(Callable[..., dict[str, Any]], source_publish)(publication)
+    assert result["ok"], result
+    assert "probe" in phases and "transport" in phases
+    with worktree_lifecycle.guard(path, timeout=0):
+        pass
+
+
+def test_guarded_completion_keeps_checkout_lifecycle_during_real_fetch(
+    source: PrRepo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_worktrees import worktree_lifecycle
+    _config, wid, root, _remote = source
+    path = cfg.tracking_dir() / f"{wid}.yaml"
+    original_fetch = git_ops.fetch
+    checked: list[bool] = []
+    def blocked() -> None:
+        with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
+            pytest.fail("completion lost lifecycle exclusion")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def fetch(*args: Any, **kwargs: Any) -> Any:
+            pool.submit(blocked).result(timeout=3)
+            checked.append(True)
+            return original_fetch(*args, **kwargs)
+        monkeypatch.setattr(git_ops, "fetch", fetch)
+        code, result = invoke([*arguments(source), "--dry-run"])
+    assert code == 0 and result["ok"] and checked, result
+    assert root.exists()
+    with worktree_lifecycle.guard(path, timeout=0):
+        pass
 
 
 @pytest.mark.parametrize("mode", ["squash", "followup", "unmerged", "fast-forward", "noop"])

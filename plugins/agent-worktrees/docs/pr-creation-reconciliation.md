@@ -31,7 +31,10 @@ than fabricate provider state or force finalization.
 
 Only the unchanged owning worktree incarnation, frozen attribution, immutable
 attempt and same-repository GitHub destination are supported in version 1.
-The checkout must be clean and on its recorded branch. Its source branch and
+The checkout must be the exact recorded Git root, share the configured anchor's
+common Git directory, and be clean and on its recorded branch. Untracked files
+and dirty submodules cannot be hidden by Git configuration. Ancestry checks ignore
+replacement objects. Its source branch and
 **every existing tracked local PR branch** must be ancestors of the configured
 remote default branch. The command never resets, rebases, deletes or archives
 source. That tracking ref must match the freshly observed remote tip at the
@@ -90,17 +93,29 @@ JSON reports `creation_reconciled: true`, `publication_outcome: unknown`,
 `creation_cancelled: false`, `provider_closed: false`, and
 `claim_released: false`.
 
-The existing FinalizeLock, publication authority, metadata/publish locks and
-fresh revision-bound record write serialize against current publishers and
-late callbacks. A stale writer cannot resurrect the retired attempt. This does
+The existing per-checkout lifecycle lease excludes guarded source publication,
+source completion and final cleanup throughout qualification. Normal tracked
+publishers retain installation publication authority; reconciliation refuses
+immediately if one still owns it at the write boundary. Slow remote observations
+hold neither clone-wide publication locks nor installation authority.
+The commit boundary acquires authority, then publication, then metadata locks,
+rechecks destination/source and both native execution-space snapshots, and
+performs a fresh revision-bound record write. A stale writer cannot resurrect
+the retired attempt. This does
 not cancel an independently accepted provider request or make an unknown
 transport outcome known; the retained evidence remains historical truth.
 
-Ordinary finalization rechecks receipt/incarnation validity, destination,
+Ordinary finalization, even after PR mode is disabled, rechecks receipt/incarnation validity, destination,
 all-state provider/remote observations and strict source/ref ancestry. It still
 checks all other PRs, dirty content, obligations and cleanup authority.
 New effects, unknown observations, new work or drift hold finalization. No
 `--force-open-pr` is required or supplied by this recovery path.
+
+Partial recovery fields and numberless abandoned attempts without a valid
+never-started cancellation remain qualification-required. Losing the entire
+receipt is not an implicit downgrade to an untracked or merged PR. Numberless
+provider healing must not replace this local disposition with a different
+association.
 
 Source acceptance is the contained disposable-Git/CLI packet
 `tests/test_pr_creation_reconcile.py`, the provider adapter controls

@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import getpass
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Any
 
 import yaml
 
 from . import config as cfg, git_ops, pr_authority, pr_creation_state as state
-from . import pr_publication_state, pr_publish, providers, tracking
-from .finalize_lock import FinalizeLock
+from . import execution_spaces, pr_publication_state, pr_publish, providers, tracking, worktree_lifecycle
 
 CONTRACT = "agent-worktrees.pr-creation-reconciliation.v1"
 _KEYS = {
@@ -55,28 +55,46 @@ def retired(pr: tracking.PRRecord) -> bool:
     return revision.isascii() and revision.isdecimal() and int(revision) + 1 == pr.pr_revision
 
 
+def requires_qualification(pr: tracking.PRRecord) -> bool:
+    """Missing/partial proof must not turn a local retirement into a bypass."""
+    return bool(
+        any(k.startswith("recovery_") for k in getattr(pr, "creation", {}))
+        or (
+            getattr(pr, "state", "") == "abandoned" and getattr(pr, "number", None) is None
+            and not state.cancelled(pr)
+        )
+    )
+
+
+def _git(cwd: str, *args: str, check: bool = True) -> CompletedProcess[str]:
+    return git_ops.git("--no-replace-objects", *args, cwd=cwd, check=check, isolated_repository=True)
+
+
 def _source(record: tracking.WorktreeRecord, repo: Any, *, expected_head: str = "") -> str:
     cwd = record.worktree_path
-    if git_ops.git("status", "--porcelain", cwd=cwd, isolated_repository=True).stdout.strip():
+    root = Path(cwd).resolve()
+    if Path(_git(cwd, "rev-parse", "--show-toplevel").stdout.strip()).resolve() != root:
+        raise ValueError("The owning checkout is not its recorded Git root.")
+    common = _git(cwd, "rev-parse", "--git-common-dir").stdout.strip()
+    anchor_common = _git(repo.anchor, "rev-parse", "--git-common-dir").stdout.strip()
+    if Path(root, common).resolve() != Path(repo.anchor, anchor_common).resolve():
+        raise ValueError("The owning checkout is unrelated to the configured anchor.")
+    if _git(cwd, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none").stdout.strip():
         raise ValueError("Dirty source is not eligible; retain the attempt.")
-    branch = git_ops.git("symbolic-ref", "--short", "HEAD", cwd=cwd, isolated_repository=True).stdout.strip()
+    branch = _git(cwd, "symbolic-ref", "--short", "HEAD").stdout.strip()
     if branch != record.branch:
         raise ValueError("The owning checkout is not on its recorded branch.")
-    head = git_ops.git("rev-parse", "--verify", "HEAD^{commit}", cwd=cwd, isolated_repository=True).stdout.strip()
+    head: str = _git(cwd, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     if expected_head and head != expected_head:
         raise ValueError("Source HEAD changed from the explicitly confirmed --expected-head.")
     upstream = f"refs/remotes/{repo.remote}/{repo.default_branch}"
     refs = {record.branch, *(p.branch for p in record.prs if p.branch)}
     for ref in refs:
-        exists = git_ops.git(
-            "show-ref", "--verify", "--quiet", f"refs/heads/{ref}", cwd=cwd,
-            check=False, isolated_repository=True,
-        )
+        exists = _git(cwd, "show-ref", "--verify", "--quiet", f"refs/heads/{ref}", check=False)
         if exists.returncode == 1 and ref != record.branch:
             continue
-        if exists.returncode or git_ops.git(
-            "merge-base", "--is-ancestor", f"refs/heads/{ref}", upstream, cwd=cwd,
-            check=False, isolated_repository=True,
+        if exists.returncode or _git(
+            cwd, "merge-base", "--is-ancestor", f"refs/heads/{ref}", upstream, check=False,
         ).returncode:
             raise ValueError(
                 "Every owned local source/PR ref must be reachable from upstream. "
@@ -90,26 +108,58 @@ def finalization_error(record: tracking.WorktreeRecord, repo: Any) -> str | None
     """A retained local disposition never waives later source or owner drift."""
     selected = [
         p for p in (getattr(record, "prs", None) or [])
-        if "recovery_contract" in getattr(p, "creation", {})
+        if requires_qualification(p)
     ]
     if not selected:
         return None
     try:
-        for pr in selected:
-            if not retired(pr) or pr.creation["owner"] != state.owner(record):
-                raise ValueError("Legacy creation retirement proof is invalid for this worktree.")
-            if pr.creation["recovery_upstream"] != f"{repo.remote}/{repo.default_branch}":
-                raise ValueError("Legacy creation retirement upstream changed.")
-            merged = pr.creation["recovery_merged_pr"]
-            with pr_publish.publish_lock(record.worktree_path):
-                _observe(record, _original(pr), repo, int(merged) if merged else None)
-        _source(record, repo)
+        with worktree_lifecycle.guard(record.yaml_path, reentrant=True):
+            for pr in selected:
+                if not retired(pr) or pr.creation["owner"] != state.owner(record):
+                    raise ValueError("Legacy creation retirement proof is invalid for this worktree.")
+                if pr.creation["recovery_upstream"] != f"{repo.remote}/{repo.default_branch}":
+                    raise ValueError("Legacy creation retirement upstream changed.")
+                merged = pr.creation["recovery_merged_pr"]
+                original = _original(pr)
+                observed = _observe(record, original, repo, int(merged) if merged else None)
+                with pr_authority.guard(timeout=0), pr_publish.publish_lock(record.worktree_path):
+                    fresh = tracking.load_record(record.yaml_path)
+                    if (
+                        pr_authority._projection(fresh) != pr_authority._projection(record)
+                        or state.owner(fresh) != state.owner(record)
+                        or _destination(record, original, repo) != observed
+                    ):
+                        raise ValueError("Retirement authority or destination changed during observation.")
+                    _source(fresh, repo)
     except (OSError, ValueError, TimeoutError, providers.ProviderError, git_ops.GitError) as exc:
         return f"Legacy creation retirement requires renewed qualification: {exc}"
     return None
 
 
-def _observe(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any, merged_pr: int | None) -> None:
+@dataclass(frozen=True)
+class _Destination:
+    fetch_url: str
+    push_urls: tuple[str, ...]
+    identity: str
+    source_identity: str
+    settings: tuple[tuple[str, str], ...]
+    cached_tip: str
+
+
+def _destination(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any) -> _Destination:
+    remote, cwd = pr.creation["remote"], record.worktree_path
+    fetch, urls, destination = pr_publish._remote_snapshot(remote, cwd=cwd)
+    identity = destination.head_identity
+    return _Destination(
+        fetch.stdout.rstrip("\r\n"), tuple(urls.stdout.splitlines()), identity,
+        identity if remote == repo.remote else pr_publish.push_identity(repo.remote, cwd=cwd),
+        pr_publish._transport_settings(remote, cwd=cwd),
+        _git(cwd, "rev-parse", "--verify",
+             f"refs/remotes/{repo.remote}/{repo.default_branch}^{{commit}}").stdout.strip(),
+    )
+
+
+def _observe(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any, merged_pr: int | None) -> _Destination:
     from .git_push_transport import pinned_destination
 
     prcfg = repo.pr
@@ -126,7 +176,7 @@ def _observe(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any, 
     if merged_pr is not None:
         matches = [
             p for p in record.prs if p.pr_id != pr.pr_id and p.number == merged_pr
-            and p.branch == pr.branch and p.repo == pr.repo and p.provider == pr.provider
+            and p.branch == pr.branch and p.repo.casefold() == pr.repo.casefold() and p.provider == pr.provider
             and p.state == "merged" and p.head_sha and p.url
         ]
         if len(matches) != 1:
@@ -139,23 +189,19 @@ def _observe(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any, 
     if siblings:
         raise ValueError("Another live association owns this publication head.")
     remote, cwd = pr.creation["remote"], record.worktree_path
-    fetch, urls, destination = pr_publish._remote_snapshot(remote, cwd=cwd)
-    if destination.head_identity != pr.creation["identity"]:
+    with pr_publish.publish_lock(cwd):
+        destination = _destination(record, pr, repo)
+    if (
+        destination.identity.casefold() != pr.creation["identity"].casefold()
+        or destination.source_identity.casefold() != pr.creation["identity"].casefold()
+    ):
         raise ValueError("Publication remote changed or is unreadable.")
-    settings = pr_publish._transport_settings(remote, cwd=cwd)
-    with pinned_destination(remote, tuple(urls.stdout.splitlines()), settings, fetch_url=fetch.stdout.rstrip("\r\n")):
+    with pinned_destination(remote, destination.push_urls, destination.settings, fetch_url=destination.fetch_url):
         tip = pr_publish._tip(remote, pr.branch, cwd)
         upstream_tip = pr_publish._tip(remote, repo.default_branch, cwd)
     if tip is None or (tip and (not merged_head or tip != merged_head)):
         raise ValueError("Remote publication head is unknown or not the exact confirmed merged head.")
-    cached_tip = git_ops.git(
-        "rev-parse", "--verify", f"refs/remotes/{repo.remote}/{repo.default_branch}^{{commit}}",
-        cwd=cwd, isolated_repository=True,
-    ).stdout.strip()
-    if (
-        not upstream_tip or upstream_tip != cached_tip
-        or pr_publish.push_identity(repo.remote, cwd=cwd) != pr.creation["identity"]
-    ):
+    if not upstream_tip or upstream_tip != destination.cached_tip:
         raise ValueError("Upstream observation is unavailable or stale; use normal sync before requalification.")
     token = providers.account_token_for_slug(pr.repo, prcfg)
     if confirm(
@@ -163,6 +209,7 @@ def _observe(record: tracking.WorktreeRecord, pr: tracking.PRRecord, repo: Any, 
         api_base=prcfg.api_base, token=token,
     ) is not True:
         raise ValueError("All-state exact-head provider observation is incomplete, open or ambiguous.")
+    return destination
 
 
 def reconcile(
@@ -187,10 +234,9 @@ def reconcile(
     repo = config.default_repo
     path = cfg.tracking_dir(config.repo_name) / f"{worktree_id}.yaml"
     try:
-        with FinalizeLock(Path(repo.worktree_root) / ".finalize.lock"), pr_authority.guard(), pr_publish.metadata_lock(
-            worktree_id, project=config.repo_name,
-        ):
+        with worktree_lifecycle.guard(path):
             record = tracking.load_record(path)
+            execution_spaces.require_record_mutation(record, config, recover_receiving=False)
             if record.worktree_id != worktree_id or record.repo != config.repo_name:
                 raise ValueError("Owning worktree identity differs from the selected project.")
             if record.status != "active":
@@ -211,23 +257,29 @@ def reconcile(
                 return _result(base, pr, already=True)
             if pr.pr_revision != expected_revision or not _legacy(pr, record):
                 raise ValueError("Expected revision or owner-stamped legacy publication evidence differs; retain the attempt.")
-            with pr_publish.publish_lock(record.worktree_path):
-                head = _source(record, repo, expected_head=expected_head)
-                _observe(record, pr, repo, merged_pr)
-                if _source(record, repo, expected_head=expected_head) != head:
-                    raise ValueError("Source changed during observation.")
-                if pr_publish.push_identity(pr.creation["remote"], cwd=record.worktree_path) != pr.creation["identity"]:
+            head = _source(record, repo, expected_head=expected_head)
+            destination = _observe(record, pr, repo, merged_pr)
+            # Normal record-bearing publishers retain installation authority.
+            # Never wait for one while holding the checkout lifecycle fence.
+            with pr_authority.guard(timeout=0), pr_publish.publish_lock(record.worktree_path), \
+                    pr_publish.metadata_lock(worktree_id, project=config.repo_name):
+                if _destination(record, pr, repo) != destination:
                     raise ValueError("Publication destination changed during observation.")
                 with tracking._RecordLock(path, require_sidecar=True):
                     fresh = tracking.load_record(path)
+                    execution_spaces.require_record_mutation(fresh, config, recover_receiving=False)
                     current = pr_publish._publication_pr(fresh, pr)
                     if (
-                        state.owner(fresh) != state.owner(record) or current is None
+                        fresh.status != "active"
+                        or pr_authority._projection(fresh) != pr_authority._projection(record)
+                        or state.owner(fresh) != state.owner(record) or current is None
                         or current.pr_revision != expected_revision
                         or not pr_publication_state.matches(current, pr)
                         or not _legacy(current, fresh)
                     ):
                         raise ValueError("Publication authority changed during observation.")
+                    if _source(fresh, repo, expected_head=expected_head) != head:
+                        raise ValueError("Source changed during observation.")
                     at = tracking._now_iso()
                     current.creation = {
                         **current.creation, "recovery_contract": CONTRACT,
@@ -241,7 +293,8 @@ def reconcile(
                     current.pr_revision += 1
                     tracking.save_record(fresh)
                     return _result(base, current, already=False)
-    except (OSError, ValueError, TimeoutError, yaml.YAMLError, providers.ProviderError, git_ops.GitError) as exc:
+    except (OSError, ValueError, TimeoutError, yaml.YAMLError, providers.ProviderError,
+            git_ops.GitError, execution_spaces.ExecutionSpaceError) as exc:
         detail = exc.stderr if isinstance(exc, git_ops.GitError) else str(exc)
         return {**base, "error": f"Legacy creation reconciliation refused: {detail}"}
 

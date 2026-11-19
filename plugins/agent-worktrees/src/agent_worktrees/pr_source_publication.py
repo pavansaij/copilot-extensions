@@ -7,10 +7,12 @@ policy or credentials are transplanted into the source repository.
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import ExitStack
 import re
 import subprocess
+from typing import Any
 
-from . import config as cfg, git_ops, hooks, pr_config, pr_publish
+from . import config as cfg, git_ops, hooks, pr_authority, pr_config, pr_publish
 from . import pr_publication_checks, pr_worker_config, publication_deadline, repos, tracking
 from .git_push_transport import observed_ref, pinned_destination
 from .providers.pr_source import same_repository
@@ -35,7 +37,7 @@ def _sha(value: str, name: str, *, absent: bool = False) -> str:
     return value
 
 
-def _canonical_destination(repo, target_repo: str, workspace: str) -> str:
+def _canonical_destination(repo: cfg.RepoConfig, target_repo: str, workspace: str) -> str:
     matches = [
         entry for entry in repos.list_repos()
         if entry.remote and pr_worker_config.matches_remote(entry.remote, target_repo, repo.pr, workspace)
@@ -48,8 +50,8 @@ def _canonical_destination(repo, target_repo: str, workspace: str) -> str:
     return matches[0].remote
 
 
-def validate_source_workspace(repo_cfg, target_repo: str, workspace: str | Path,
-                              branch: str, expected_head: str) -> dict:
+def validate_source_workspace(repo_cfg: cfg.RepoConfig, target_repo: str, workspace: str | Path,
+                              branch: str, expected_head: str) -> dict[str, Any]:
     """Qualify reachable local source; callers must separately run policy checks.
 
     The returned binding is freshly computed data, never an attestation accepted
@@ -104,8 +106,8 @@ def validate_source_workspace(repo_cfg, target_repo: str, workspace: str | Path,
     }
 
 
-def source_evidence(repo_cfg, target_repo: str, workspace: str | Path,
-                    branch: str, expected_head: str) -> dict:
+def source_evidence(repo_cfg: cfg.RepoConfig, target_repo: str, workspace: str | Path,
+                    branch: str, expected_head: str) -> dict[str, Any]:
     """Produce recheckable local evidence using only the resolved target policy."""
     binding = validate_source_workspace(repo_cfg, target_repo, workspace, branch, expected_head)
     checks = pr_publication_checks.before_publish(
@@ -119,7 +121,7 @@ def source_evidence(repo_cfg, target_repo: str, workspace: str | Path,
     return {**binding, "publication_checks": checks}
 
 
-def _caller(worktree_id: str, config: cfg.Config):
+def _caller(worktree_id: str, config: cfg.Config) -> tracking.WorktreeRecord:
     if not worktree_id or Path(worktree_id).name != worktree_id:
         raise SourcePublicationError("Source publication requires a managed caller")
     path = cfg.tracking_dir(config.repo_name) / f"{worktree_id}.yaml"
@@ -145,7 +147,7 @@ def _caller(worktree_id: str, config: cfg.Config):
 
 def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
                    workspace: str | Path, branch: str, expected_head: str,
-                   expected_remote_head: str | None = None) -> dict:
+                   expected_remote_head: str | None = None) -> dict[str, Any]:
     """Publish only the reviewed source tip, preserving existing remote history.
 
     No automatic fetch, merge, squash or rebase is performed. When remote history
@@ -155,10 +157,13 @@ def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
     """
     result = {"ok": False, "repo": target_repo, "branch": branch, "head": expected_head,
               "publication_state": "not_pushed"}
+    lifetime = ExitStack()
     try:
         caller = _caller(worktree_id, config)
+        lifetime.enter_context(pr_authority.publication_lifecycle(config, record=caller))
+        caller = _caller(worktree_id, config)
         resolution = pr_config.resolve_repo_config_for_slug(config, target_repo)
-        if not resolution.resolved:
+        if not resolution.resolved or resolution.repo_config is None:
             raise SourcePublicationError(resolution.error or "Target repository binding is unresolved")
         repo = resolution.repo_config
         timeout = publication_deadline.configured(repo.pr)
@@ -175,7 +180,7 @@ def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
         root, remote = evidence["workspace"], evidence["remote"]
         binding = {key: value for key, value in evidence.items() if key != "publication_checks"}
 
-        def validate_transport_source():
+        def validate_transport_source() -> None:
             with pr_publish.metadata_lock(worktree_id, project=config.repo_name,
                                           timeout=publication_deadline.lock_wait(timeout)):
                 if validate_source_workspace(repo, target_repo, root, branch, expected_head) != binding:
@@ -224,3 +229,5 @@ def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
             return {**result, "ok": True, "observed_head": actual}
     except (ValueError, OSError, git_ops.GitError, TimeoutError, subprocess.SubprocessError) as exc:
         return {**result, "error": str(exc)}
+    finally:
+        lifetime.close()

@@ -58,6 +58,34 @@ def publication(function: Callable[P, R]) -> Callable[P, R]:
     return guarded
 
 
+@contextlib.contextmanager
+def publication_lifecycle(
+    config: cfg.Config, *, record: tracking.WorktreeRecord | None = None,
+    worktree_id: str | None = None,
+) -> Iterator[None]:
+    """Keep admitted publication inside the existing checkout retirement fence."""
+    from . import worktree_lifecycle
+
+    path = record.yaml_path if record is not None else (
+        cfg.tracking_dir(config.repo_name) / f"{worktree_id}.yaml" if worktree_id else None
+    )
+    if path is None:
+        yield
+        return
+    try:
+        path.stat()
+    except FileNotFoundError:
+        if record is not None:
+            raise ValueError("The publication owner's ledger is missing.") from None
+        yield
+        return
+    with worktree_lifecycle.guard(path, reentrant=True):
+        fresh = tracking.load_record(path)
+        if fresh.status in ("finalizing", "finalized"):
+            raise ValueError("Publication owner is closing or finalized; reload its lifecycle.")
+        yield
+
+
 def registry_transaction(function: Callable[P, R]) -> Callable[P, R]:
     @wraps(function)
     def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -84,8 +112,8 @@ class PublicationLock:
 
     def acquire(self) -> None:
         self.finalization.acquire()
-        authority = guard(timeout=self.timeout)
         try:
+            authority = guard(timeout=self.timeout)
             authority.__enter__()
             self.authority = authority
             pr_publication_state.require_current(self.record, self.pr)
