@@ -8,8 +8,9 @@ import os
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from io import BufferedIOBase
 from pathlib import Path
-from typing import BinaryIO, Protocol, TypedDict, cast
+from typing import Protocol, TypedDict, cast
 
 import pytest
 
@@ -112,7 +113,7 @@ def install_receiver_observer(
         observation.accepted += 1
         original_reader = handler.rfile
         reader = ObservedReader(original_reader, observation)
-        handler.rfile = cast(BinaryIO, reader)
+        handler.rfile = cast(BufferedIOBase, reader)
         try:
             original_handle(handler)
         except BaseException:
