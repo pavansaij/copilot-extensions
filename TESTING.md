@@ -71,14 +71,17 @@ replace the complete prepared-membership acceptance portfolio.
 
 The manual `prepared-membership-native.yml` `sender_diagnostics` input runs
 the registered read sender observation after the original prepared-membership
-prelude on a fresh Windows worker. Its fixture-owned shell copies observe fixed
-timing, connection and exception-type fields only in the sender's finalization;
-no endpoint, token or payload is emitted. A focused control proves that the
-timed operations and all source outside the sender remain byte-identical.
+prelude on a fresh Windows worker. The post-entry selection leaves the complete
+sender file byte-identical and reports at most 32 caught base-exception types and
+HResult numbers after the hook returns; no error message, endpoint, token or
+payload is emitted. The separate stage selection observes fixed timing,
+connection and exception-type fields only in fixture-owned sender finalization.
+A focused control proves that its timed operations and all source outside the
+sender remain byte-identical.
 The original receiver assertion, child deadline and sender budget remain.
 Even a completed observation deliberately fails as diagnostic evidence, never
 as native acceptance. The same selection is available locally in Worktrees
-`tests/test_post_tool_sender_diagnostics.py -k registered_prepared_sender_stage_observation`
+`tests/test_post_tool_sender_diagnostics.py -k registered_prepared_post_entry_error_observation`
 with `AGENT_WORKTREES_SENDER_DIAGNOSTIC=1` and the existing explicit-tier runner.
 
 The membership-tail file's `-k registered_policy_timeout_observation` selection invokes
