@@ -10,6 +10,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import agent_procutil
@@ -48,6 +49,22 @@ class _GitCall(typing.TypedDict, total=False):
 
 class _ObservedTimeout(subprocess.TimeoutExpired):
     observation_started: bool = True
+
+
+@pytest.fixture
+def mocked_git_destination(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Supply repository metadata separately from these transport-only Git mocks."""
+    from agent_worktrees import config, pr_publish
+    def metadata(*args: str, **kwargs: typing.Any) -> subprocess.CompletedProcess[str]:
+        assert args == ("rev-parse", "--git-common-dir")
+        return subprocess.CompletedProcess(args, 0, str(tmp_path), "")
+    def snapshot(remote: str, *, cwd: str) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str], pr_publish.PushTarget]:
+        assert remote == "origin" and cwd == "."
+        result = subprocess.CompletedProcess(["remote", "get-url"], 0, "https://example.com/owner/repo.git\n", "")
+        return result, result, pr_publish.PushTarget(remote, "owner/repo", "example.com/owner/repo")
+    monkeypatch.setattr(config, "install_dir", lambda: tmp_path / "runtime")
+    monkeypatch.setattr(pr_publish, "git_ops", SimpleNamespace(git=metadata))
+    monkeypatch.setattr(pr_publish, "_remote_snapshot", snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +306,7 @@ class TestNoHooks:
         assert seen["no_hooks"] is True
 
 
+@pytest.mark.usefixtures("mocked_git_destination")
 class TestPush:
     """#3561: unlike ``TestNoHooks``'s squash/rebase plumbing, ``push()`` is
     the terminal action that actually publishes to remote -- a real pre-push
@@ -343,6 +361,7 @@ class TestPush:
         assert no_hooks_seen == [False, False]  # neither the injected nor the fallback call
 
 
+@pytest.mark.usefixtures("mocked_git_destination")
 class TestPushTimeout:
     """A repo's pre-push hook re-invokes the full agent-worktrees binstub,
     which resolves its own runtime slot on every call and can stall for the
@@ -795,6 +814,7 @@ class TestPathHelpers:
 from agent_worktrees import git_ops as go  # noqa: E402
 
 
+@pytest.mark.usefixtures("mocked_git_destination")
 class TestCrossAccountAuth:
     @pytest.mark.parametrize("url,owner", [
         ("https://github.com/ThomasMichon/copilot-extensions.git", "ThomasMichon"),
