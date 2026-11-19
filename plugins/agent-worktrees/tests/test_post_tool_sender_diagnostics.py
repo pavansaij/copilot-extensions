@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import secrets
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, TypedDict, cast
+from typing import BinaryIO, Protocol, TypedDict, cast
 
 import pytest
 
@@ -16,12 +19,197 @@ pytest_plugins = ("test_post_tool_shell",)
 class PreparedFixture(TypedDict):
     payload_root: Path
     harness: Path
+    sidecar: Path
 
 
 class PostToolFixture(Protocol):
     test_registered_prepared_cell_post_tool_uses_selected_original_owners: Callable[
         [PreparedFixture, pytest.MonkeyPatch, str, str], None
     ]
+
+
+class FrameObservation(TypedDict):
+    size: int
+    framing: str
+    json: str
+    version: bool
+    auth: str
+    kind: str
+
+
+def classify_frame(raw: bytes, token: str) -> FrameObservation:
+    observation: FrameObservation = {
+        "size": len(raw), "framing": "newline" if raw.endswith(b"\n") else "incomplete",
+        "json": "invalid", "version": False, "auth": "unchecked", "kind": "unchecked",
+    }
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return observation
+    if not isinstance(value, dict):
+        observation["json"] = "nonobject"
+        return observation
+    request = cast(dict[str, object], value)
+    observation["json"] = "object"
+    observation["version"] = request.get("version") == 1
+    try:
+        authenticated = secrets.compare_digest(str(request.get("token") or ""), token)
+    except TypeError:
+        observation["auth"] = "invalid"
+    else:
+        observation["auth"] = "match" if authenticated else "mismatch"
+    kind = str(request.get("kind") or "")
+    observation["kind"] = kind if kind in {
+        "readHookDemand", "nativeToolMutation", "nativeToolBatchMutation",
+        "shellToolMutation", "mixedToolBatchMutation", "worktreeChanged",
+    } else "other"
+    return observation
+
+
+class FrameReader(Protocol):
+    def readline(self, size: int = -1, /) -> bytes: ...
+
+
+class TokenServer(Protocol):
+    token: str
+
+
+@dataclass
+class ReceiverObservation:
+    accepted: int = 0
+    read_errors: int = 0
+    handler_errors: int = 0
+    dispatch_calls: int = 0
+    dispatch_errors: int = 0
+    frames: list[FrameObservation] = field(default_factory=list)
+
+
+class ObservedReader:
+    def __init__(self, original: FrameReader, observation: ReceiverObservation) -> None:
+        self.original = original
+        self.observation = observation
+        self.returned: list[bytes] = []
+
+    def readline(self, size: int = -1, /) -> bytes:
+        try:
+            raw = self.original.readline(size)
+        except BaseException:
+            self.observation.read_errors += 1
+            raise
+        self.returned.append(raw)
+        return raw
+
+
+def install_receiver_observer(
+    monkeypatch: pytest.MonkeyPatch, observation: ReceiverObservation,
+) -> None:
+    from agent_worktrees import hook_ipc
+
+    original_handle = hook_ipc._Handler.handle
+    original_dispatch = hook_ipc.HookIpcServer._on_read_demand
+
+    def handle(handler: hook_ipc._Handler) -> None:
+        observation.accepted += 1
+        original_reader = handler.rfile
+        reader = ObservedReader(original_reader, observation)
+        handler.rfile = cast(BinaryIO, reader)
+        try:
+            original_handle(handler)
+        except BaseException:
+            observation.handler_errors += 1
+            raise
+        finally:
+            handler.rfile = original_reader
+            for raw in reader.returned:
+                observation.frames.append(classify_frame(raw, cast(TokenServer, handler.server).token))
+
+    def dispatch(server: hook_ipc.HookIpcServer, request: dict[str, object]) -> None:
+        observation.dispatch_calls += 1
+        try:
+            original_dispatch(server, request)
+        except BaseException:
+            observation.dispatch_errors += 1
+            raise
+
+    monkeypatch.setattr(hook_ipc._Handler, "handle", handle)
+    monkeypatch.setattr(hook_ipc.HookIpcServer, "_on_read_demand", dispatch)
+
+
+@pytest.mark.guard
+def test_receiver_observer_preserves_reader_return_and_exception() -> None:
+    raw = b"private-frame\n"
+    failure = OSError("private-error")
+    sizes: list[int] = []
+
+    class Reader:
+        def readline(self, size: int = -1, /) -> bytes:
+            sizes.append(size)
+            if len(sizes) == 1:
+                return raw
+            raise failure
+
+    observation = ReceiverObservation()
+    reader = ObservedReader(Reader(), observation)
+    assert reader.readline(2048) is raw
+    with pytest.raises(OSError) as caught:
+        reader.readline(4096)
+    assert caught.value is failure
+    assert sizes == [2048, 4096]
+    assert reader.returned == [raw]
+    assert observation.read_errors == 1
+
+
+@pytest.mark.guard
+def test_receiver_observer_restores_reader_on_handler_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from agent_worktrees import hook_ipc
+
+    failure = OSError("private-error")
+    original_reader = BytesIO(b"private-frame\n")
+    handler = cast(hook_ipc._Handler, SimpleNamespace(
+        rfile=original_reader, server=SimpleNamespace(token="private-token"),
+    ))
+
+    def handle(selected: hook_ipc._Handler) -> None:
+        assert selected.rfile.readline(2048) == b"private-frame\n"
+        raise failure
+
+    monkeypatch.setattr(hook_ipc._Handler, "handle", handle)
+    observation = ReceiverObservation()
+    install_receiver_observer(monkeypatch, observation)
+    with pytest.raises(OSError) as caught:
+        hook_ipc._Handler.handle(handler)
+    assert caught.value is failure
+    assert handler.rfile is original_reader
+    assert not original_reader.closed
+    assert observation.accepted == observation.handler_errors == 1
+    assert observation.frames == [classify_frame(b"private-frame\n", "private-token")]
+    original_reader.close()
+
+
+@pytest.mark.guard
+@pytest.mark.parametrize(("raw", "expected"), [
+    (b"", ("incomplete", "invalid", False, "unchecked", "unchecked")),
+    (b"[]\n", ("newline", "nonobject", False, "unchecked", "unchecked")),
+    (b"\xff\n", ("newline", "invalid", False, "unchecked", "unchecked")),
+    (b'{"version":2,"token":"wrong","kind":"private-kind"}\n',
+     ("newline", "object", False, "mismatch", "other")),
+    (b'{"version":1,"token":"private-token","kind":"readHookDemand","payload":"private-data"}\n',
+     ("newline", "object", True, "match", "readHookDemand")),
+])
+def test_receiver_observer_redacts_frames(
+    raw: bytes, expected: tuple[str, str, bool, str, str],
+) -> None:
+    observation = classify_frame(raw, "private-token")
+    assert (
+        observation["framing"], observation["json"], observation["version"],
+        observation["auth"], observation["kind"],
+    ) == expected
+    assert observation["size"] == len(raw)
+    assert "private" not in json.dumps(observation)
+    assert "wrong" not in json.dumps(observation)
 
 
 def observe_after_entry(harness: Path, expression: str) -> None:
@@ -148,3 +336,33 @@ $observedErrors = @(
         prepared_read_event, monkeypatch, shell, case,
     )
     pytest.fail("Post-entry observation is diagnostic only, not uninstrumented native acceptance")
+
+
+@pytest.mark.portfolio_tier("T2")
+@pytest.mark.effect("process")
+@pytest.mark.effect("filesystem")
+@pytest.mark.effect("network")
+@pytest.mark.skipif(
+    os.name != "nt" or os.environ.get("AGENT_WORKTREES_SENDER_DIAGNOSTIC") != "1",
+    reason="Explicit receiver-only observation; not acceptance",
+)
+@pytest.mark.parametrize("prepared_read_event", ["cell"], indirect=True)
+@pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
+@pytest.mark.parametrize("case", ["read"])
+def test_registered_prepared_receiver_observation(
+    prepared_read_event: PreparedFixture, monkeypatch: pytest.MonkeyPatch, shell: str, case: str,
+) -> None:
+    from dataclasses import asdict
+
+    observation = ReceiverObservation()
+    install_receiver_observer(monkeypatch, observation)
+    fixture = cast(PostToolFixture, importlib.import_module("test_post_tool_shell"))
+    try:
+        fixture.test_registered_prepared_cell_post_tool_uses_selected_original_owners(
+            prepared_read_event, monkeypatch, shell, case,
+        )
+    finally:
+        print("receiver_observation=" + json.dumps({
+            **asdict(observation), "sidecar_exists": prepared_read_event["sidecar"].exists(),
+        }, sort_keys=True))
+    pytest.fail("Receiver observation is diagnostic only, not uninstrumented native acceptance")

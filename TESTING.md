@@ -70,8 +70,15 @@ These observations do not explain an earlier timeout, waive a failed run or
 replace the complete prepared-membership acceptance portfolio.
 
 The manual `prepared-membership-native.yml` `sender_diagnostics` input runs
-the registered read sender observation after the original prepared-membership
-prelude on a fresh Windows worker. The post-entry selection leaves the complete
+the registered read receiver observation after the original prepared-membership
+prelude on a fresh Windows worker. This selection leaves both the complete sender
+and PowerShell harness unchanged. It delegates to the original handler and reader,
+preserving returned byte objects, raised exceptions and the original reader for
+finish/close. After handling, it emits only connection/dispatch counts and fixed
+framing, JSON, version, authentication and kind categories plus byte lengths.
+Python finalization reports sidecar existence even on an original assertion failure.
+No frame, credential, endpoint, payload or error message is emitted.
+The separate post-entry selection leaves the complete
 sender file byte-identical and reports at most 32 caught base-exception types and
 HResult numbers after the hook returns; no error message, endpoint, token or
 payload is emitted. The separate stage selection observes fixed timing,
@@ -81,7 +88,7 @@ sender remain byte-identical.
 The original receiver assertion, child deadline and sender budget remain.
 Even a completed observation deliberately fails as diagnostic evidence, never
 as native acceptance. The same selection is available locally in Worktrees
-`tests/test_post_tool_sender_diagnostics.py -k registered_prepared_post_entry_error_observation`
+`tests/test_post_tool_sender_diagnostics.py -k registered_prepared_receiver_observation`
 with `AGENT_WORKTREES_SENDER_DIAGNOSTIC=1` and the existing explicit-tier runner.
 
 The membership-tail file's `-k registered_policy_timeout_observation` selection invokes
