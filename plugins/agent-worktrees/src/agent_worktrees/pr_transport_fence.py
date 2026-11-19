@@ -16,6 +16,7 @@ import uuid
 
 if TYPE_CHECKING:
     from .git_ops import PushResult
+    from .providers.base import PullResult
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -74,9 +75,9 @@ def generation(head: Head, *, initialize: bool = False) -> str:
     return value
 
 
-def _targets(remote: str, refspec: str, cwd: str) -> tuple[Head, ...]:
+def _targets(remote: str, refspec: str, cwd: str, lifetime: ExitStack) -> tuple[Head, ...]:
     from . import git_ops, pr_publish
-    from .git_push_transport import captured_urls
+    from .git_push_transport import captured_urls, pinned_destination
     branch = refspec.rpartition(":")[2] if ":" in refspec else refspec.removeprefix("+")
     if any(c.isspace() or c in "*?\0\r\n" for c in branch):
         raise ValueError("Publication fencing requires one exact ref.")
@@ -91,12 +92,27 @@ def _targets(remote: str, refspec: str, cwd: str) -> tuple[Head, ...]:
     if not branch or branch.startswith("-") or any(c.isspace() or c in "*?\0\r\n" for c in branch):
         raise ValueError("Publication fencing requires one exact head.")
     urls = captured_urls(remote)
-    if urls:
-        identities = {pr_publish._identity(url, cwd) for url in urls}
-    else:
+    if not urls:
         with pr_publish.publish_lock(cwd):
-            identity = pr_publish.push_identity(remote, cwd=cwd)
-        identities = {identity or pr_publish._identity(remote, cwd)}
+            literal = "://" in remote or ":" in remote or Path(remote).is_absolute() or remote.startswith(("./", "../", ".\\", "..\\"))
+            if not literal:
+                fetch, pushes, _target = pr_publish._remote_snapshot(remote, cwd=cwd)
+                literal = bool((fetch.returncode or pushes.returncode) and Path(cwd, remote).exists())
+            if literal:
+                alias = f"agent-worktrees-capture-{uuid.uuid4().hex}"
+                prefix = ("-c", f"remote.{alias}.url={remote}")
+                fetch = git_ops.git(*prefix, "remote", "get-url", alias, cwd=cwd,
+                                    isolated_repository=True, timeout=10, kill_tree=True)
+                pushes = git_ops.git(*prefix, "remote", "get-url", "--push", "--all", alias,
+                                     cwd=cwd, isolated_repository=True, timeout=10, kill_tree=True)
+                settings: tuple[tuple[str, str], ...] = ()
+            else:
+                settings = pr_publish._transport_settings(remote, cwd=cwd)
+            urls = tuple(pushes.stdout.splitlines())
+            if fetch.returncode or pushes.returncode or not fetch.stdout.strip() or not urls or any(not u.strip() for u in urls):
+                raise ValueError("The exact push destinations are unavailable.")
+        lifetime.enter_context(pinned_destination(remote, urls, settings, fetch_url=fetch.stdout.rstrip("\r\n")))
+    identities = {pr_publish._identity(url, cwd) for url in urls}
     if not identities or "" in identities:
         raise ValueError("Publication destination identity is unavailable.")
     return tuple(sorted({Head(identity, branch) for identity in identities}, key=lambda h: h.directory))
@@ -115,7 +131,7 @@ def publication(function: Callable[P, PushResult]) -> Callable[P, PushResult]:
             if requested is not None and type(requested) not in (int, float):
                 raise ValueError("Invalid publication timeout.")
             timeout = float(requested) if isinstance(requested, (int, float)) else push_timeout.DEFAULT_PUSH_TIMEOUT
-            heads = _targets(bound["remote"], bound["branch"], str(bound["cwd"]))
+            heads = _targets(bound["remote"], bound["branch"], str(bound["cwd"]), lifetime)
             for head in heads:
                 lifetime.enter_context(head.guard(timeout=publication_deadline.validate(timeout)))
         except (GitError, subprocess.SubprocessError):
@@ -145,6 +161,32 @@ def qualification_scope(function: Callable[P, R]) -> Callable[P, R]:
         finally:
             current.reset(token)
     return scoped
+
+
+def provider_creation(function: Callable[P, PullResult]) -> Callable[P, PullResult]:
+    signature = inspect.signature(function)
+    @wraps(function)
+    def fenced(*args: P.args, **kwargs: P.kwargs) -> PullResult:
+        from . import pr_publish, tracking
+        from .providers.base import ProviderError
+        bound = signature.bind(*args, **kwargs).arguments
+        provider, scope = bound["self"], bound["scope"]
+        binding = scope.repo, scope.head, scope.api_base
+        head = Head(provider.authority_endpoint(scope.api_base) + "/" + scope.repo,
+                    scope.head.rsplit(":", 1)[-1])
+        lease = head.guard(timeout=pr_publish.PUBLISH_LOCK_ACQUIRE_TIMEOUT_S)
+        try:
+            lease.__enter__()
+        except (OSError, ValueError, TimeoutError) as exc:
+            raise ProviderError(f"Provider creation is fenced: {exc}") from exc
+        try:
+            if (scope.repo, scope.head, scope.api_base) != binding:
+                raise ProviderError("Provider creation binding changed before admission.")
+            tracking._atomic_write(head.directory / "generation", uuid.uuid4().hex)
+            return function(*args, **kwargs)
+        finally:
+            lease.__exit__(None, None, None)
+    return fenced
 
 
 @contextmanager

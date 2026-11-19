@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING, cast
 from urllib.parse import urlparse
 from urllib.parse import quote
 
+from .. import pr_transport_fence
 from ..pr_contract import Comment, CommentThread, PRDiff, PRSnapshot, Review, ReviewNudgeResult, ThreadsResult
 from ..pr_checks import ChecksReport
 from .base import ProviderError, PRScope, PullResult, reject_copilot_mention, run_cli
@@ -100,6 +101,7 @@ class GitHubProvider:
             env["GH_HOST"] = host
         return env
 
+    @pr_transport_fence.provider_creation
     def create_pull(self, scope: PRScope, *, token: str | None = None) -> PullResult:
         reject_copilot_mention(scope.title, what="PR title")
         reject_copilot_mention(scope.body, what="PR description")
@@ -115,7 +117,10 @@ class GitHubProvider:
             args.append("--draft")
         for label in scope.labels:
             args += ["--label", label]
-        proc = run_cli(args, env=self._env(token))
+        env = self._env(token, host=self.authority_endpoint(scope.api_base))
+        if token is not None:
+            env.update({key: token for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")})
+        proc = run_cli(args, env=env)
         if proc.returncode != 0:
             raise ProviderError(
                 f"gh pr create failed for {scope.repo} "

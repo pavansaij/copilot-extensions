@@ -54,10 +54,12 @@ class _ObservedTimeout(subprocess.TimeoutExpired):
 @pytest.fixture
 def mocked_git_destination(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Supply repository metadata separately from these transport-only Git mocks."""
-    from agent_worktrees import config, pr_publish
+    from agent_worktrees import config, git_push_transport, pr_publish
     def metadata(*args: str, **kwargs: typing.Any) -> subprocess.CompletedProcess[str]:
-        assert args == ("rev-parse", "--git-common-dir")
-        return subprocess.CompletedProcess(args, 0, str(tmp_path), "")
+        if args == ("rev-parse", "--git-common-dir"):
+            return subprocess.CompletedProcess(args, 0, str(tmp_path), "")
+        assert args[:3] == ("config", "--null", "--get-regexp")
+        return subprocess.CompletedProcess(args, 1, "", "")
     def snapshot(remote: str, *, cwd: str) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str], pr_publish.PushTarget]:
         assert remote == "origin" and cwd == "."
         result = subprocess.CompletedProcess(["remote", "get-url"], 0, "https://example.com/owner/repo.git\n", "")
@@ -65,6 +67,21 @@ def mocked_git_destination(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setattr(config, "install_dir", lambda: tmp_path / "runtime")
     monkeypatch.setattr(pr_publish, "git_ops", SimpleNamespace(git=metadata))
     monkeypatch.setattr(pr_publish, "_remote_snapshot", snapshot)
+    class TransportGit:
+        def git(self, *args: str, **kwargs: typing.Any) -> subprocess.CompletedProcess[str]:
+            if args == ("rev-parse", "--git-path", "hooks/pre-push"):
+                return subprocess.CompletedProcess(args, 0, str(tmp_path / "absent-hook"), "")
+            assert "push" in args
+            return go.git(*args, **kwargs)
+        def __getattr__(self, name: str) -> typing.Any:
+            if name == "_auth_config_args_for_url":
+                return lambda url: go._auth_config_args("origin", cwd=".")
+            return getattr(go, name)
+    def refreshed(remote: str, destinations: tuple[str, ...], refspec: str, cwd: str | Path,
+                  timeout: float | None, expected: str | None = None) -> None:
+        assert remote == "origin" and destinations == ("https://example.com/owner/repo.git",)
+    monkeypatch.setattr(git_push_transport, "git_ops", TransportGit())
+    monkeypatch.setattr(git_push_transport, "_refresh_tracking", refreshed)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +346,8 @@ class TestPush:
 
         monkeypatch.setattr(go, "git", fake_git)
         assert bool(go.push("origin", "main", cwd=".")) is True
-        assert seen["args"][:1] == ("push",)
+        assert "push" in seen["args"]
+        assert seen["args"][seen["args"].index("push") + 1].startswith("agent-worktrees-pinned-")
         assert seen["no_hooks"] is False
         assert seen["isolated_repository"] is True
 

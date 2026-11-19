@@ -6,6 +6,7 @@ import contextlib
 import inspect
 import os
 import threading
+import time
 from functools import wraps
 from pathlib import Path
 from collections.abc import Callable, Iterator
@@ -85,32 +86,43 @@ def publication_lifecycle(
         yield lambda: None
         return
     root = Path(workspace).resolve() if workspace is not None else None
-    def owners() -> dict[Path, tracking.WorktreeRecord]:
-        found = {path.resolve(): tracking.load_record(path)}
-        if root is not None:
-            for ledger in _ledgers(config.repo_name):
-                if not ledger.exists():
-                    continue
+    def load(candidate: Path) -> tracking.WorktreeRecord:
+        if candidate.is_symlink():
+            raise ValueError("Source ownership contains an unsafe ledger path.")
+        try:
+            return tracking.load_record(candidate)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise ValueError("Declared source ownership is unavailable.") from exc
+    before = {path.resolve(): load(path)}
+    ledgers = tuple(sorted(_ledgers(config.repo_name))) if root is not None else ()
+    if root is not None:
+        from . import git_ops
+        git_dir = Path(git_ops.git(
+            "--no-replace-objects", "rev-parse", "--absolute-git-dir",
+            cwd=root, isolated_repository=True, timeout=10, kill_tree=True,
+        ).stdout.strip())
+        linked_id = git_dir.name if git_dir.parent.name == "worktrees" else ""
+        for ledger in ledgers:
+            candidate = ledger / f"{linked_id}.yaml"
+            if linked_id and candidate.is_file():
+                item = load(candidate)
+                if Path(item.worktree_path).resolve() == root:
+                    before[candidate.resolve()] = item
+        if not any(Path(item.worktree_path).resolve() == root for item in before.values()):
+            deadline, inspected = time.monotonic() + 3, 0
+            for ledger in ledgers:
                 for candidate in ledger.glob("*.yaml"):
-                    if candidate.is_symlink():
-                        raise ValueError("Source ownership contains an unsafe ledger path.")
-                    try:
-                        item = tracking.load_record(candidate)
-                    except (OSError, ValueError, yaml.YAMLError) as exc:
-                        raise ValueError("Declared source ownership is unavailable.") from exc
+                    inspected += 1
+                    if inspected > 4096 or time.monotonic() >= deadline:
+                        raise ValueError("Source owner lookup exceeded its bounded legacy-routing budget.")
+                    item = load(candidate)
                     if item.worktree_path and Path(item.worktree_path).resolve() == root:
-                        found[candidate.resolve()] = item
-            from . import git_ops
-            git_dir = Path(git_ops.git(
-                "--no-replace-objects", "rev-parse", "--absolute-git-dir",
-                cwd=root, isolated_repository=True, timeout=10, kill_tree=True,
-            ).stdout.strip())
-            if git_dir.parent.name == "worktrees" and not any(
-                Path(item.worktree_path).resolve() == root for item in found.values()
-            ):
+                        before[candidate.resolve()] = item
+            if linked_id and not any(Path(item.worktree_path).resolve() == root for item in before.values()):
                 raise ValueError("Linked source checkout has no qualified native owner.")
-        return found
-    before = owners()
+    unowned_source = root is not None and not any(
+        Path(item.worktree_path).resolve() == root for item in before.values()
+    )
     def identities(items: dict[Path, tracking.WorktreeRecord]) -> dict[Path, tuple[object, ...]]:
         return {
             entry: (record_machine_identity.subject_fence(item, entry), item.worktree_path)
@@ -118,9 +130,11 @@ def publication_lifecycle(
         }
     expected = identities(before)
     def recheck() -> None:
-        fresh = owners()
+        fresh = {entry: load(entry) for entry in before}
         if identities(fresh) != expected:
             raise ValueError("Publication caller or source ownership changed.")
+        if unowned_source and tuple(sorted(_ledgers(config.repo_name))) != ledgers:
+            raise ValueError("Source owner routing changed; requalify the unmanaged source.")
         if any(item.status in ("finalizing", "finalized", "archived") for item in fresh.values()):
             raise ValueError("Publication caller or source is closing or finalized; reload its lifecycle.")
     with contextlib.ExitStack() as lifetime:

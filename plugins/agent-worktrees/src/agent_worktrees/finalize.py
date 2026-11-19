@@ -288,6 +288,11 @@ def push_changes(
             )
             return False
     branch = _worktree_branch(record, worktree_id)
+    from . import pr_creation_reconcile
+    active_pr = record.active_pr() if record is not None else None
+    if active_pr is not None and pr_creation_reconcile.requires_qualification(active_pr):
+        output.err("The selected attempt is locally retired or damaged; use an explicit new contribution and distinct head.")
+        return False
     if explicit_rewrite:
         pr_publication_labels.validate_scope(repo.pr, record.active_pr() if record else None)
 

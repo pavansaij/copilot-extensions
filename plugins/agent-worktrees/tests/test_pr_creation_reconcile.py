@@ -149,6 +149,73 @@ def test_retired_attempt_is_not_an_implicit_or_same_head_publication_retry(
     assert path.read_bytes() == before
 
 
+def test_set_pr_does_not_assign_a_provider_identity_to_retirement(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    from agent_worktrees import pr_ops
+    config, wid, _wt, _remote, path, _original, _provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    before = path.read_bytes()
+    result = pr_ops.set_pr(wid, url="https://github.com/example/repo/pull/44", number=44, config=config)
+    assert not result["success"] and "cannot be reassigned" in result["error"]
+    assert path.read_bytes() == before
+
+
+def test_optional_pr_mode_does_not_turn_retirement_into_direct_publication(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    config, wid, wt, remote, path, _original, _provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    (wt / "later.txt").write_text("new work remains owned\n")
+    git_ops.git("add", "later.txt", cwd=str(wt))
+    git_ops.git("commit", "-m", "New contribution", cwd=str(wt))
+    config = replace(config, repos={config.repo_name: replace(
+        config.default_repo, pr=replace(config.default_repo.pr, required=False),
+    )})
+    before = path.read_bytes(), git_ops.git("--git-dir", str(remote), "rev-parse", "master", cwd=str(wt)).stdout
+    monkeypatch.setattr(git_ops, "push", lambda *a, **k: pytest.fail("direct publication attempted"))
+    assert not finalize.push_changes(wid, config)
+    assert (path.read_bytes(), git_ops.git("--git-dir", str(remote), "rev-parse", "master", cwd=str(wt)).stdout) == before
+    assert (wt / "later.txt").read_text() == "new work remains owned\n"
+
+
+def test_explanation_uses_the_same_retirement_refusal(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
+    from agent_worktrees import finalize_landing
+    from agent_worktrees.finalize_ref import landing
+    config, _wid, wt, _remote, path, _original, provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    record = tracking.load_record(path)
+    upstream = "refs/remotes/origin/master"
+    checked = {upstream: landing("HEAD", upstream, str(wt))}
+    assert checked[upstream].landed
+    provider.confirm_reconciled_head_v1 = lambda *a, **k: False
+    landed, error, _evidence = finalize_landing._pr_content_landed(
+        record, config.default_repo, "HEAD", cwd=str(wt), checked=checked, existing_bases={upstream},
+    )
+    assert landed is False and error and "retirement requires renewed qualification" in error
+
+
+def test_provider_creation_attempt_invalidates_prior_head_observation(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from agent_worktrees.providers import ProviderError, github
+    from agent_worktrees.providers.base import PRScope
+    branch = selected(legacy[5]).branch
+    monkeypatch.setattr(
+        github, "run_cli", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "request outcome unavailable"),
+    )
+    def observe(*args: Any, **kwargs: Any) -> bool:
+        with pytest.raises(ProviderError):
+            github.GitHubProvider().create_pull(PRScope(
+                repo="example/repo", head=branch, base="another-base", title="Existing head",
+                api_base="github.com",
+            ), token="")
+        return True
+    legacy[6].confirm_reconciled_head_v1 = observe
+    before = legacy[4].read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "intervened" in result["error"]
+    assert legacy[4].read_bytes() == before
+
+
 def test_explicit_new_contribution_preserves_the_retired_attempt(
     legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -507,17 +574,23 @@ def test_nonfinalized_owner_status_can_reconcile(
     assert tracking.load_record(legacy[4]).status == status
 
 
+@pytest.mark.parametrize("route", ["origin", "split"])
 def test_intervening_transport_invalidates_even_restored_remote_absence(
-    legacy: Legacy, capfd: pytest.CaptureFixture[str],
+    legacy: Legacy, capfd: pytest.CaptureFixture[str], tmp_path: Path, route: str,
 ) -> None:
     from agent_worktrees import hooks
     config, _wid, wt, _remote, path, record, provider = legacy
     branch = selected(record).branch
     head = git_ops.git("rev-parse", "HEAD", cwd=str(wt)).stdout.strip()
+    if route == "split":
+        fetch_store = tmp_path / "fetch.git"
+        git_ops.git("init", "--bare", str(fetch_store), cwd=str(wt))
+        git_ops.git("remote", "add", route, str(fetch_store), cwd=str(wt))
+        git_ops.git("remote", "set-url", "--add", "--push", route, str(legacy[3]), cwd=str(wt))
     def observe(*args: Any, **kwargs: Any) -> bool:
         with hooks.allow_pr_push():
-            assert git_ops.push("origin", f"{head}:refs/heads/{branch}", cwd=config.default_repo.anchor)
-            assert git_ops.push("origin", f":refs/heads/{branch}", cwd=config.default_repo.anchor)
+            assert git_ops.push(route, f"{head}:refs/heads/{branch}", cwd=config.default_repo.anchor)
+            assert git_ops.push(route, f":refs/heads/{branch}", cwd=config.default_repo.anchor)
         return True
     provider.confirm_reconciled_head_v1 = observe
     before = path.read_bytes()

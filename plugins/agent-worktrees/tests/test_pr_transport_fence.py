@@ -5,11 +5,38 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 from threading import Barrier, Event
+from typing import Any
 
 import pytest
 from agent_procutil.owned_process import run_caller_owned
 from agent_worktrees import config as cfg, git_ops, pr_transport_fence
 from agent_worktrees.git_push_transport import pinned_destination
+
+
+def test_unpinned_pushurl_is_captured_before_a_remote_repoint(
+    pr_repo: tuple[cfg.Config, str, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _config, _wid, root, destination = pr_repo
+    fetch_store, replacement = tmp_path / "fetch.git", tmp_path / "replacement.git"
+    for store in (fetch_store, replacement):
+        git_ops.git("init", "--bare", str(store), cwd=str(root))
+    git_ops.git("remote", "add", "split", str(fetch_store), cwd=str(root))
+    git_ops.git("remote", "set-url", "--add", "--push", "split", str(destination), cwd=str(root))
+    head = git_ops.git("rev-parse", "HEAD", cwd=str(root)).stdout.strip()
+    original = git_ops.git
+    changed = False
+    def git(*args: Any, **kwargs: Any) -> Any:
+        nonlocal changed
+        if "push" in args and not changed:
+            changed = True
+            original("remote", "set-url", "--push", "split", str(replacement), cwd=str(root))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(git_ops, "git", git)
+    result = git_ops.push("split", "HEAD:refs/heads/topic", cwd=str(root))
+    assert result.ok and changed, result.stderr
+    assert original("--git-dir", str(destination), "rev-parse", "topic", cwd=str(root)).stdout.strip() == head
+    assert original("--git-dir", str(replacement), "show-ref", "--verify", "refs/heads/topic",
+                    cwd=str(root), check=False).returncode != 0
 
 
 def test_unrelated_heads_keep_concurrent_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

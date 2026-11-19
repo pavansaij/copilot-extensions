@@ -1986,6 +1986,9 @@ def _set_pr_locked(
     # BEFORE applying any branch/number correction below (see
     # tracking.ensure_pr_id's docstring for why this must be its own save,
     # not folded into the final one below).
+    from . import pr_creation_reconcile
+    if pr_creation_reconcile.requires_qualification(pr):
+        return {**base, "error": "A local retirement cannot be reassigned; create a separate association for new work."}
     if tracking.ensure_pr_id(pr):
         tracking.save_record(record)
 
@@ -2305,24 +2308,7 @@ def pr_threads(
 from .pr_pull_forward import pull_forward_recommendation as _pull_forward_recommendation  # noqa: E402,F401
 
 
-def _pr_to_dict(pr: PRRecord) -> dict[str, Any]:
-    from . import pr_creation_reconcile
-    return {
-        "pr_id": pr.pr_id, "pr_revision": pr.pr_revision, "creation": dict(pr.creation),
-        **({"local_disposition": "retired", "publication_outcome": "unknown"}
-           if pr_creation_reconcile.retired(pr) else {}),
-        "state": pr.state,
-        "branch": pr.branch,
-        "base_sha": pr.base_sha,
-        "head_sha": pr.head_sha,
-        "patch_id": pr.patch_id,
-        "url": pr.url,
-        "number": pr.number,
-        "provider": pr.provider,
-        "repo": pr.repo,
-        "opened_at": pr.opened_at,
-        "closed_at": pr.closed_at,
-    }
+from .pr_metadata import pr_to_dict as _pr_to_dict  # noqa: E402
 
 
 @pr_authority.publication

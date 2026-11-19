@@ -172,7 +172,7 @@ def finalization_error(record: tracking.WorktreeRecord, repo: Any) -> str | None
                 with ExitStack() as lifetime:
                     for head in sorted(heads, key=lambda h: h.directory):
                         lifetime.enter_context(head.guard())
-                    with pr_authority.guard(timeout=0), pr_publish.publish_lock(record.worktree_path):
+                    with pr_publish.publish_lock(record.worktree_path, acquire_timeout=0):
                         _validate_proof(tracking.load_record(record.yaml_path), repo, proof)
                 if scope is not None:
                     scope.proofs[key] = proof
@@ -347,9 +347,9 @@ def reconcile(
                 raise ValueError("Expected revision or owner-stamped legacy publication evidence differs; retain the attempt.")
             head = _source(record, repo, expected_head=expected_head)
             destination = _observe(record, pr, repo, merged_pr, initialize_generation=True)
-            # Normal record-bearing publishers retain installation authority.
-            # Never wait for one while holding the checkout lifecycle fence.
-            with destination.head.guard(), pr_authority.guard(timeout=0), pr_publish.publish_lock(record.worktree_path), \
+            # The record writer acquires installation authority only for its
+            # atomic association write, never for the source scan.
+            with destination.head.guard(), pr_publish.publish_lock(record.worktree_path, acquire_timeout=0), \
                     pr_publish.metadata_lock(worktree_id, project=config.repo_name):
                 _provider(pr, repo)
                 if (
