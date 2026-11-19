@@ -70,9 +70,11 @@ These observations do not explain an earlier timeout, waive a failed run or
 replace the complete prepared-membership acceptance portfolio.
 
 The manual `prepared-membership-native.yml` `sender_diagnostics` input runs
-only the registered read sender observation on a fresh Windows worker.
-It instruments fixture-owned shell copies with fixed stage, elapsed-time,
-completion and exception-type fields; no endpoint, token or payload is emitted.
+the registered read sender observation after the original prepared-membership
+prelude on a fresh Windows worker. Its fixture-owned shell copies observe fixed
+timing, connection and exception-type fields only in the sender's finalization;
+no endpoint, token or payload is emitted. A focused control proves that the
+timed operations and all source outside the sender remain byte-identical.
 The original receiver assertion, child deadline and sender budget remain.
 Even a completed observation deliberately fails as diagnostic evidence, never
 as native acceptance. The same selection is available locally in Worktrees

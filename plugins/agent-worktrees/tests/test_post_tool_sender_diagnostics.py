@@ -28,49 +28,49 @@ def instrument_sender(source: str) -> str:
     start = source.index("function Send-PostToolReadDemand")
     end = source.index("function Get-PostToolRuntimeRoot", start)
     sender = source[start:end]
-    for original, replacement in (
-        (
-            "    $client = $null",
-            "    $script:senderObservation = [ordered]@{ stage = 'entered' }\n"
-            "    $client = $null",
-        ),
-        (
-            "        $clock = [Diagnostics.Stopwatch]::StartNew()",
-            "        $script:senderObservation.stage = 'serialized'\n"
-            "        $clock = [Diagnostics.Stopwatch]::StartNew()",
-        ),
-        (
-            "        $remaining = 100 - [int]$clock.ElapsedMilliseconds",
-            "        $script:senderObservation.elapsed_ms = $clock.Elapsed.TotalMilliseconds\n"
-            "        $remaining = 100 - [int]$clock.ElapsedMilliseconds",
-        ),
-        (
-            "        if (-not $client.ConnectAsync([Net.IPAddress]::Loopback, $port).Wait($remaining)) { return }",
-            "        $script:senderObservation.stage = 'allocated'\n"
-            "        $connect = $client.ConnectAsync([Net.IPAddress]::Loopback, $port)\n"
-            "        $script:senderObservation.connect_ms = $clock.Elapsed.TotalMilliseconds\n"
-            "        if (-not $connect.Wait($remaining)) {\n"
-            "            $script:senderObservation.stage = 'connect-timeout'; return\n"
-            "        }\n"
-            "        $script:senderObservation.stage = 'connected'",
-        ),
-        (
-            "        $null = $client.GetStream().WriteAsync($bytes, 0, $bytes.Length).Wait($remaining)",
-            "        $write = $client.GetStream().WriteAsync($bytes, 0, $bytes.Length)\n"
-            "        $script:senderObservation.write_ms = $clock.Elapsed.TotalMilliseconds\n"
-            "        $script:senderObservation.completed = $write.Wait($remaining)\n"
-            "        $script:senderObservation.stage = 'write-waited'",
-        ),
-        (
-            "    } catch {} finally {",
-            "    } catch {\n"
-            "        $script:senderObservation.exception_type = $_.Exception.GetType().FullName\n"
-            "    } finally {",
-        ),
-    ):
-        assert sender.count(original) == (2 if "$remaining = 100 -" in original else 1)
-        sender = sender.replace(original, replacement)
+    original = (
+        "    } catch {} finally {\n"
+        "        if ($null -ne $client) { $client.Dispose() }\n"
+        "    }\n"
+    )
+    replacement = r"""    } catch {
+        $caught = $_.Exception.GetBaseException()
+    } finally {
+        try {
+            $script:senderObservation = @{
+                elapsed_ms = if ($null -ne $clock) { $clock.Elapsed.TotalMilliseconds } else { $null }
+                remaining_ms = $remaining
+                client_exists = $null -ne $client
+                connected = $null -ne $client -and $client.Connected
+                caught_type = if ($null -ne $caught) { $caught.GetType().FullName } else { $null }
+                caught_hresult = if ($null -ne $caught) { $caught.HResult } else { $null }
+                socket_error = if ($caught -is [Net.Sockets.SocketException]) { $caught.SocketErrorCode.ToString() } else { $null }
+            }
+        } finally {
+            if ($null -ne $client) { $client.Dispose() }
+        }
+    }
+"""
+    assert sender.count(original) == 1
+    sender = sender.replace(original, replacement)
     return source[:start] + sender + source[end:]
+
+
+@pytest.mark.guard
+def test_sender_observer_leaves_timed_operations_unchanged() -> None:
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "hook-facts.ps1").read_text(
+        encoding="utf-8",
+    )
+    observed = instrument_sender(source)
+    before, _, after = source.partition("function Send-PostToolReadDemand")
+    after_sender = "function Get-PostToolRuntimeRoot"
+    assert observed.startswith(before)
+    assert observed.partition(after_sender)[2] == source.partition(after_sender)[2]
+    original_operations = after.partition("    } catch {} finally {")[0]
+    observed_operations = observed.partition("function Send-PostToolReadDemand")[2].partition(
+        "    } catch {",
+    )[0]
+    assert observed_operations == original_operations
 
 
 @pytest.mark.portfolio_tier("T2")
@@ -83,8 +83,9 @@ def instrument_sender(source: str) -> str:
 )
 @pytest.mark.parametrize("prepared_read_event", ["cell"], indirect=True)
 @pytest.mark.parametrize("shell", ["pwsh", "powershell.exe"])
+@pytest.mark.parametrize("case", ["read"])
 def test_registered_prepared_sender_stage_observation(
-    prepared_read_event: PreparedFixture, monkeypatch: pytest.MonkeyPatch, shell: str,
+    prepared_read_event: PreparedFixture, monkeypatch: pytest.MonkeyPatch, shell: str, case: str,
 ) -> None:
     facts = prepared_read_event["payload_root"] / "scripts" / "hook-facts.ps1"
     facts.write_text(instrument_sender(facts.read_text(encoding="utf-8")), encoding="utf-8")
@@ -100,6 +101,6 @@ def test_registered_prepared_sender_stage_observation(
     harness.write_text(entry, encoding="utf-8")
     fixture = cast(PostToolFixture, importlib.import_module("test_post_tool_shell"))
     fixture.test_registered_prepared_cell_post_tool_uses_selected_original_owners(
-        prepared_read_event, monkeypatch, shell, "read",
+        prepared_read_event, monkeypatch, shell, case,
     )
     pytest.fail("Sender observation is diagnostic only, not uninstrumented native acceptance")
