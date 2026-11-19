@@ -6,7 +6,7 @@ import importlib
 import json
 import os
 import secrets
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from io import BufferedIOBase
 from pathlib import Path
@@ -148,7 +148,7 @@ def report_receiver_observation(
 
 class ReceiverPacketObserver:
     @pytest.hookimpl(hookwrapper=True)
-    def pytest_runtest_call(self, item: pytest.Item) -> Iterator[None]:
+    def pytest_runtest_call(self, item: pytest.Item) -> Generator[None, None, None]:
         if (
             not isinstance(item, pytest.Function)
             or item.path.name != "test_post_tool_shell.py"
