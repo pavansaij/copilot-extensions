@@ -69,7 +69,17 @@ child deadline. Use the contained runner with `--allow-explicit-tiers
 These observations do not explain an earlier timeout, waive a failed run or
 replace the complete prepared-membership acceptance portfolio.
 
-The same file's `-k registered_policy_timeout_observation` selection invokes
+The manual `prepared-membership-native.yml` `sender_diagnostics` input runs
+only the registered read sender observation on a fresh Windows worker.
+It instruments fixture-owned shell copies with fixed stage, elapsed-time,
+completion and exception-type fields; no endpoint, token or payload is emitted.
+The original receiver assertion, child deadline and sender budget remain.
+Even a completed observation deliberately fails as diagnostic evidence, never
+as native acceptance. The same selection is available locally in Worktrees
+`tests/test_post_tool_sender_diagnostics.py -k registered_prepared_sender_stage_observation`
+with `AGENT_WORKTREES_SENDER_DIAGNOSTIC=1` and the existing explicit-tier runner.
+
+The membership-tail file's `-k registered_policy_timeout_observation` selection invokes
 the unchanged `cross-modes` cell composition on both engines. Only that test
 module's subprocess namespace is adapted. If its original ten-second entry
 times out, the adapter reports fixed shell-build/policy-start/policy-complete
