@@ -6,7 +6,7 @@ import importlib
 import json
 import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from io import BufferedIOBase
 from pathlib import Path
@@ -134,6 +134,118 @@ def install_receiver_observer(
 
     monkeypatch.setattr(hook_ipc._Handler, "handle", handle)
     monkeypatch.setattr(hook_ipc.HookIpcServer, "_on_read_demand", dispatch)
+
+
+def report_receiver_observation(
+    observation: ReceiverObservation, fixture: PreparedFixture,
+) -> None:
+    from dataclasses import asdict
+
+    print("receiver_observation=" + json.dumps({
+        **asdict(observation), "sidecar_exists": fixture["sidecar"].exists(),
+    }, sort_keys=True))
+
+
+class ReceiverPacketObserver:
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_call(self, item: pytest.Item) -> Iterator[None]:
+        if (
+            not isinstance(item, pytest.Function)
+            or item.path.name != "test_post_tool_shell.py"
+            or item.originalname
+            != "test_registered_prepared_cell_post_tool_uses_selected_original_owners"
+            or item.callspec.params.get("case") != "read"
+        ):
+            yield
+            return
+        fixture = cast(PreparedFixture, item.funcargs["prepared_read_event"])
+        monkeypatch = cast(pytest.MonkeyPatch, item.funcargs["monkeypatch"])
+        observation = ReceiverObservation()
+        install_receiver_observer(monkeypatch, observation)
+        try:
+            yield
+        finally:
+            report_receiver_observation(observation, fixture)
+
+
+@pytest.mark.guard
+@pytest.mark.parametrize(("filename", "originalname", "case"), [
+    ("test_post_tool_shell.py",
+     "test_registered_prepared_cell_post_tool_uses_selected_original_owners", "native"),
+    ("test_post_tool_sender_diagnostics.py",
+     "test_registered_prepared_cell_post_tool_uses_selected_original_owners", "read"),
+    ("test_post_tool_shell.py", "test_registered_read_demand_is_send_only", "read"),
+])
+def test_packet_receiver_observer_ignores_other_original_items(
+    filename: str, originalname: str, case: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    def unexpected_install(*args: object) -> None:
+        pytest.fail("A different original item must remain uninstrumented")
+
+    monkeypatch.setattr(
+        install_receiver_observer.__module__ + ".install_receiver_observer", unexpected_install,
+    )
+    item = cast(pytest.Function, Mock(
+        spec=pytest.Function, path=Path(filename), originalname=originalname,
+        callspec=SimpleNamespace(params={"case": case}),
+    ))
+    wrapper = ReceiverPacketObserver().pytest_runtest_call(item)
+    assert next(wrapper) is None
+    with pytest.raises(StopIteration):
+        next(wrapper)
+
+
+@pytest.mark.guard
+@pytest.mark.parametrize("fails", [False, True])
+def test_packet_receiver_observer_delegates_original_outcome(
+    fails: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    installed: list[ReceiverObservation] = []
+
+    def install(selected: pytest.MonkeyPatch, observation: ReceiverObservation) -> None:
+        assert selected is monkeypatch
+        installed.append(observation)
+
+    monkeypatch.setattr(
+        install_receiver_observer.__module__ + ".install_receiver_observer", install,
+    )
+    fixture: PreparedFixture = {
+        "payload_root": tmp_path, "harness": tmp_path / "harness.ps1",
+        "sidecar": tmp_path / "sidecar.json",
+    }
+    item = cast(pytest.Function, Mock(
+        spec=pytest.Function, path=Path("test_post_tool_shell.py"),
+        originalname="test_registered_prepared_cell_post_tool_uses_selected_original_owners",
+        callspec=SimpleNamespace(params={"case": "read"}),
+        funcargs={"prepared_read_event": fixture, "monkeypatch": monkeypatch},
+    ))
+    wrapper = ReceiverPacketObserver().pytest_runtest_call(item)
+    assert next(wrapper) is None
+    assert len(installed) == 1
+    installed[0].accepted = 1
+    if fails:
+        failure = AssertionError("private-original-failure")
+        with pytest.raises(AssertionError) as caught:
+            wrapper.throw(failure)
+        assert caught.value is failure
+    else:
+        with pytest.raises(StopIteration):
+            next(wrapper)
+    output = capsys.readouterr().out
+    assert output.startswith("receiver_observation=")
+    assert json.loads(output.partition("=")[2]) == {
+        "accepted": 1, "read_errors": 0, "handler_errors": 0, "dispatch_calls": 0,
+        "dispatch_errors": 0, "frames": [], "sidecar_exists": False,
+    }
+    assert str(tmp_path) not in output
+    assert "private" not in output
 
 
 @pytest.mark.guard
@@ -353,8 +465,6 @@ $observedErrors = @(
 def test_registered_prepared_receiver_observation(
     prepared_read_event: PreparedFixture, monkeypatch: pytest.MonkeyPatch, shell: str, case: str,
 ) -> None:
-    from dataclasses import asdict
-
     observation = ReceiverObservation()
     install_receiver_observer(monkeypatch, observation)
     fixture = cast(PostToolFixture, importlib.import_module("test_post_tool_shell"))
@@ -363,7 +473,5 @@ def test_registered_prepared_receiver_observation(
             prepared_read_event, monkeypatch, shell, case,
         )
     finally:
-        print("receiver_observation=" + json.dumps({
-            **asdict(observation), "sidecar_exists": prepared_read_event["sidecar"].exists(),
-        }, sort_keys=True))
+        report_receiver_observation(observation, prepared_read_event)
     pytest.fail("Receiver observation is diagnostic only, not uninstrumented native acceptance")

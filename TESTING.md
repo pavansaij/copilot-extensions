@@ -70,9 +70,14 @@ These observations do not explain an earlier timeout, waive a failed run or
 replace the complete prepared-membership acceptance portfolio.
 
 The manual `prepared-membership-native.yml` `sender_diagnostics` input runs
-the registered read receiver observation after the original prepared-membership
-prelude on a fresh Windows worker. This selection leaves both the complete sender
-and PowerShell harness unchanged. It delegates to the original handler and reader,
+the exact original prepared-membership packet on a fresh Windows worker.
+An initial diagnostic-only test registers a call hook, then deliberately fails;
+the remaining modules, selection and test identities retain the default packet's
+order. Its setup-only module does not register the isolated adapter's fixture
+plugin or import the original packet early. Only the original registered read
+cases receive the receiver observer.
+This selection leaves both the complete sender and PowerShell harness unchanged.
+It delegates to the original handler and reader,
 preserving returned byte objects, raised exceptions and the original reader for
 finish/close. After handling, it emits only connection/dispatch counts and fixed
 framing, JSON, version, authentication and kind categories plus byte lengths.
@@ -87,7 +92,11 @@ A focused control proves that its timed operations and all source outside the
 sender remain byte-identical.
 The original receiver assertion, child deadline and sender budget remain.
 Even a completed observation deliberately fails as diagnostic evidence, never
-as native acceptance. The same selection is available locally in Worktrees
+as native acceptance. Local packet mechanics can select
+`tests/test_hook_packet_receiver_diagnostics.py`
+first, followed by `tests/test_post_tool_shell.py`, with
+`-k "enable_original_packet_receiver_observer or (registered_prepared_cell_post_tool_uses_selected_original_owners and read and not shell-read)"`.
+The isolated adapter remains available in Worktrees
 `tests/test_post_tool_sender_diagnostics.py -k registered_prepared_receiver_observation`
 with `AGENT_WORKTREES_SENDER_DIAGNOSTIC=1` and the existing explicit-tier runner.
 

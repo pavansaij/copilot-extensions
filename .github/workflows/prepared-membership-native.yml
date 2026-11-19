@@ -27,6 +27,7 @@ on:
       - "plugins/agent-worktrees/scripts/post-tool-hook.ps1"
       - "plugins/agent-worktrees/tests/test_post_tool_shell.py"
       - "plugins/agent-worktrees/tests/test_post_tool_sender_diagnostics.py"
+      - "plugins/agent-worktrees/tests/test_hook_packet_receiver_diagnostics.py"
       - "plugins/agent-worktrees/src/agent_worktrees/hook_ipc.py"
       - "plugins/agent-worktrees/src/agent_worktrees/status_monitor_wake.py"
 
@@ -143,7 +144,7 @@ jobs:
           --test-file tests/test_pre_tool_bounded_reads.py
           -k "prepared_cell_membership or registered_prepared_cell or send_debits_allocation or prepared_json_engine_retains_shell_semantics or pretool_bounded"
           --allow-explicit-tiers --test-timeout 30 --timeout 300
-      - name: Observe original receiver without accepting an instrumented result
+      - name: Observe the exact original packet without accepting an instrumented result
         if: ${{ inputs.sender_diagnostics == true }}
         env:
           AGENT_WORKTREES_REQUIRE_NATIVE_MEMBERSHIP: "1"
@@ -152,9 +153,11 @@ jobs:
           PYTEST_ADDOPTS: "-vv -rP --tb=short --durations=10"
         run: >-
           python tools/run-plugin-tests.py agent-worktrees
+          --test-file tests/test_hook_packet_receiver_diagnostics.py
           --test-file tests/test_managed_session.py
-          --test-file tests/test_post_tool_sender_diagnostics.py
-          -k "prepared_cell_membership or receiver_observer or registered_prepared_receiver_observation"
+          --test-file tests/test_post_tool_shell.py
+          --test-file tests/test_pre_tool_bounded_reads.py
+          -k "enable_original_packet_receiver_observer or prepared_cell_membership or registered_prepared_cell or send_debits_allocation or prepared_json_engine_retains_shell_semantics or pretool_bounded"
           --allow-explicit-tiers --test-timeout 30 --timeout 300
       - name: Qualify mixed-batch registered entries and original receiver
         if: ${{ inputs.sender_diagnostics != true }}
