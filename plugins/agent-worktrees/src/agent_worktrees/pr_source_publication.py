@@ -160,7 +160,9 @@ def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
     lifetime = ExitStack()
     try:
         caller = _caller(worktree_id, config)
-        lifetime.enter_context(pr_authority.publication_lifecycle(config, record=caller))
+        recheck_owners = lifetime.enter_context(
+            pr_authority.publication_lifecycle(config, record=caller, workspace=workspace),
+        )
         caller = _caller(worktree_id, config)
         resolution = pr_config.resolve_repo_config_for_slug(config, target_repo)
         if not resolution.resolved or resolution.repo_config is None:
@@ -211,6 +213,8 @@ def publish_source(worktree_id: str, config: cfg.Config, *, target_repo: str,
             result.update(publication_checks=evidence["publication_checks"],
                           expected_remote_head=old_head, head_identity=evidence["head_identity"],
                           publication_state="unknown")
+            with pr_authority.guard(timeout=0):
+                recheck_owners()
             with hooks.allow_pr_push():
                 pushed = pr_publish.push_checked(
                     None, remote, f"{expected_head}:refs/heads/{branch}", cwd=root,

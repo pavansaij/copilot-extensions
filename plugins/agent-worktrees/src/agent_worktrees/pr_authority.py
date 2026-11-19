@@ -54,6 +54,11 @@ def publication(function: Callable[P, R]) -> Callable[P, R]:
         config = arguments["config"]
         prcfg = arguments.get("prcfg", config.default_repo.pr)
         with guard(timeout=publication_deadline.lock_wait(publication_deadline.configured(prcfg))):
+            target = arguments.get("target_pr")
+            if target is not None:
+                from . import pr_creation_reconcile
+                if pr_creation_reconcile.requires_qualification(target):
+                    raise ValueError("A retained local retirement cannot be opened as a provider association.")
             return function(*args, **kwargs)
     return guarded
 
@@ -61,8 +66,8 @@ def publication(function: Callable[P, R]) -> Callable[P, R]:
 @contextlib.contextmanager
 def publication_lifecycle(
     config: cfg.Config, *, record: tracking.WorktreeRecord | None = None,
-    worktree_id: str | None = None,
-) -> Iterator[None]:
+    worktree_id: str | None = None, workspace: str | Path | None = None,
+) -> Iterator[Callable[[], None]]:
     """Keep admitted publication inside the existing checkout retirement fence."""
     from . import worktree_lifecycle
 
@@ -70,20 +75,59 @@ def publication_lifecycle(
         cfg.tracking_dir(config.repo_name) / f"{worktree_id}.yaml" if worktree_id else None
     )
     if path is None:
-        yield
+        yield lambda: None
         return
     try:
         path.stat()
     except FileNotFoundError:
         if record is not None:
             raise ValueError("The publication owner's ledger is missing.") from None
-        yield
+        yield lambda: None
         return
-    with worktree_lifecycle.guard(path, reentrant=True):
-        fresh = tracking.load_record(path)
-        if fresh.status in ("finalizing", "finalized"):
-            raise ValueError("Publication owner is closing or finalized; reload its lifecycle.")
-        yield
+    root = Path(workspace).resolve() if workspace is not None else None
+    def owners() -> dict[Path, tracking.WorktreeRecord]:
+        found = {path.resolve(): tracking.load_record(path)}
+        if root is not None:
+            for ledger in _ledgers(config.repo_name):
+                if not ledger.exists():
+                    continue
+                for candidate in ledger.glob("*.yaml"):
+                    if candidate.is_symlink():
+                        raise ValueError("Source ownership contains an unsafe ledger path.")
+                    try:
+                        item = tracking.load_record(candidate)
+                    except (OSError, ValueError, yaml.YAMLError) as exc:
+                        raise ValueError("Declared source ownership is unavailable.") from exc
+                    if item.worktree_path and Path(item.worktree_path).resolve() == root:
+                        found[candidate.resolve()] = item
+            from . import git_ops
+            git_dir = Path(git_ops.git(
+                "--no-replace-objects", "rev-parse", "--absolute-git-dir",
+                cwd=root, isolated_repository=True, timeout=10, kill_tree=True,
+            ).stdout.strip())
+            if git_dir.parent.name == "worktrees" and not any(
+                Path(item.worktree_path).resolve() == root for item in found.values()
+            ):
+                raise ValueError("Linked source checkout has no qualified native owner.")
+        return found
+    before = owners()
+    def identities(items: dict[Path, tracking.WorktreeRecord]) -> dict[Path, tuple[object, ...]]:
+        return {
+            entry: (record_machine_identity.subject_fence(item, entry), item.worktree_path)
+            for entry, item in items.items()
+        }
+    expected = identities(before)
+    def recheck() -> None:
+        fresh = owners()
+        if identities(fresh) != expected:
+            raise ValueError("Publication caller or source ownership changed.")
+        if any(item.status in ("finalizing", "finalized", "archived") for item in fresh.values()):
+            raise ValueError("Publication caller or source is closing or finalized; reload its lifecycle.")
+    with contextlib.ExitStack() as lifetime:
+        for owner_path in sorted(before):
+            lifetime.enter_context(worktree_lifecycle.guard(owner_path, reentrant=True))
+        recheck()
+        yield recheck
 
 
 def registry_transaction(function: Callable[P, R]) -> Callable[P, R]:
@@ -135,7 +179,7 @@ def guard(*, timeout: float | None = None) -> Iterator[None]:
     """Exclude PR association writers across all projects in this installation."""
     path = cfg.install_dir() / "pr-rewrite-authority.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
-    key = os.path.normcase(str(path.resolve()))
+    key = f"{os.getpid()}:{os.path.normcase(str(path.resolve()))}"
     paths = getattr(_held, "paths", None)
     if paths is None:
         paths = _held.paths = set()

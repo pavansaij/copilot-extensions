@@ -8,11 +8,12 @@ import tempfile
 import shlex
 import uuid
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
+from collections.abc import Iterator, Sequence
 
-from . import git_ops, push_timeout
+from . import git_ops, pr_transport_fence, push_timeout
 from .github_credentials import GitAuthArgs
 
 _destination: ContextVar[
@@ -29,7 +30,7 @@ def _auth_attempts(auth: list[str]) -> list[list[str]]:
 
 @contextmanager
 def pinned_destination(remote: str, urls: tuple[str, ...],
-                       settings: tuple[tuple[str, str], ...] = (), *, fetch_url: str | None = None):
+                       settings: tuple[tuple[str, str], ...] = (), *, fetch_url: str | None = None) -> Iterator[None]:
     """Bind this publication's transport/auth to an already verified URL."""
     token = _destination.set((remote, urls, settings, fetch_url))
     try:
@@ -43,8 +44,10 @@ def captured_urls(remote: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _url_aliases(pairs, *, logical_remote: str = "", logical_fetch: str = ""):
-    def quoted(value):
+def _url_aliases(
+    pairs: Sequence[tuple[str, str]], *, logical_remote: str = "", logical_fetch: str = "",
+) -> Iterator[list[str]]:
+    def quoted(value: str) -> str:
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
     with tempfile.TemporaryDirectory(prefix="agent-worktrees-url-config-") as directory:
         config = Path(directory) / "pin.config"
@@ -64,7 +67,7 @@ def _url_aliases(pairs, *, logical_remote: str = "", logical_fetch: str = ""):
 
 
 @contextmanager
-def _hook_identity(remote: str, cwd: str | Path):
+def _hook_identity(remote: str, cwd: str | Path) -> Iterator[list[str]]:
     """Forward the real pre-push hook unchanged except for its logical remote name."""
     hook = git_ops.git("rev-parse", "--git-path", "hooks/pre-push", cwd=cwd,
                        isolated_repository=True).stdout.strip()
@@ -82,6 +85,7 @@ def _hook_identity(remote: str, cwd: str | Path):
         yield ["-c", f"core.hooksPath={Path(directory).as_posix()}"]
 
 
+@pr_transport_fence.publication
 def push(
     remote: str, branch: str, *, cwd: str | Path,
     force_with_lease: bool = False, force_with_lease_expect: str | None = None,
@@ -114,8 +118,13 @@ def push(
     for prefix in attempts:
         try:
             aliases = [(url, f"{transport_remote}-url-{index}") for index, url in enumerate(destinations)]
-            with _url_aliases(aliases, logical_remote=remote, logical_fetch=pinned[3] or "") if destinations else nullcontext([]) as alias_args, \
-                    _hook_identity(remote, cwd) if destinations else nullcontext([]) as hook_args:
+            fetch_url = (pinned[3] or "") if pinned is not None else ""
+            alias_context: AbstractContextManager[list[str]] = nullcontext([])
+            hook_context: AbstractContextManager[list[str]] = nullcontext([])
+            if destinations:
+                alias_context = _url_aliases(aliases, logical_remote=remote, logical_fetch=fetch_url)
+                hook_context = _hook_identity(remote, cwd)
+            with alias_context as alias_args, hook_context as hook_args:
                 result = git_ops.git(
                     *prefix, *destination_args, *alias_args, *hook_args, "push", transport_remote, branch, *extra, "--quiet",
                     cwd=cwd, check=False, timeout=timeout, kill_tree=True,

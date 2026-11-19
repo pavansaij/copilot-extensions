@@ -2,20 +2,28 @@
 
 from dataclasses import replace
 import json
+import runpy
+import subprocess
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Callable, cast
 
 import pytest
+import yaml
 from machine_transport import detect_platform
 
 from agent_worktrees import __main__ as cli
 from agent_worktrees import config as cfg
 from agent_worktrees import finalize, finalize_open_pr_gate, git_ops, tracking
 from agent_worktrees import pr_creation_state as state
+from agent_worktrees.finalize_lock import FinalizeLock
+from agent_worktrees.pr_publish import _remote_snapshot as native_remote_snapshot
 from test_pr_creation_cancel import reservation as reservation, source_snapshot
 
-pytestmark = pytest.mark.contract("agent_worktrees.pr_publish.publication_state")
+pytestmark = [
+    pytest.mark.contract("agent_worktrees.pr_publish.publication_state"),
+    pytest.mark.usefixtures("git_only_mux"),
+]
 Legacy = tuple[cfg.Config, str, Path, Path, Path, tracking.WorktreeRecord, Any]
 snapshot = cast(Callable[[Path], tuple[str, bytes, str, str]], source_snapshot)
 
@@ -42,8 +50,23 @@ def selected(record: tracking.WorktreeRecord) -> tracking.PRRecord:
 
 
 @pytest.fixture
-def legacy(reservation: Legacy) -> Legacy:
+def legacy(reservation: Legacy, monkeypatch: pytest.MonkeyPatch) -> Legacy:
+    from agent_worktrees import pr_publish
     config, wid, wt, remote, path, _record, provider = reservation
+    identity = pr_publish._identity
+    private_store = identity(str(remote), str(wt))
+    assert private_store
+    # One private Git store substitutes for one forge repository in probes and transport.
+    def store_identity(url: str, cwd: str) -> str:
+        actual = identity(url, cwd)
+        return "github.com/example/repo" if actual == private_store else actual
+    monkeypatch.setattr(pr_publish, "_identity", store_identity)
+    def destination(remote_name: str, *, cwd: str) -> Any:
+        fetch, urls, target = native_remote_snapshot(remote_name, cwd=cwd)
+        if target.head_identity == "github.com/example/repo":
+            target = pr_publish.PushTarget(remote_name, "example/repo", target.head_identity)
+        return fetch, urls, target
+    monkeypatch.setattr(pr_publish, "_remote_snapshot", destination)
     record = tracking.load_record(path)
     selected(record).creation["phase"] = "publishing"
     selected(record).pr_revision += 1
@@ -108,6 +131,39 @@ def test_confirmed_retry_keeps_original_receipt(legacy: Legacy, capfd: pytest.Ca
     saved = path.read_bytes()
     assert invoke(legacy, capfd)["already_reconciled"]
     assert path.read_bytes() == saved
+
+
+def test_retired_attempt_is_not_an_implicit_or_same_head_publication_retry(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from agent_worktrees import pr_ops
+    config, wid, _wt, _remote, path, original, _provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    before = path.read_bytes()
+    implicit = pr_ops.create_pr(wid, config, title="Another contribution", open_pr=False)
+    assert not implicit["success"] and "--new" in implicit["error"]
+    replay = pr_ops.create_pr(
+        wid, config, title="Another contribution", branch=selected(original).branch, new=True, open_pr=False,
+    )
+    assert not replay["success"] and "cannot be replayed" in replay["error"]
+    assert path.read_bytes() == before
+
+
+def test_explicit_new_contribution_preserves_the_retired_attempt(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from agent_worktrees import pr_ops
+    config, wid, wt, _remote, path, _original, _provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    before = yaml.safe_load(path.read_text(encoding="utf-8"))["prs"][0]
+    git_ops.git("commit", "--allow-empty", "-m", "New contribution", cwd=str(wt))
+    monkeypatch.setattr(git_ops, "rebase", lambda *a, **k: False)
+    result = pr_ops.create_pr(wid, config, title="Distinct new contribution", new=True, open_pr=False)
+    assert not result["success"] and "genuine conflicts" in result["error"]
+    fresh = tracking.load_record(path)
+    assert len(fresh.prs) == 2 and fresh.prs[1].pr_id != fresh.prs[0].pr_id
+    assert fresh.prs[1].branch != fresh.prs[0].creation["recovery_branch"]
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["prs"][0] == before
 
 
 def test_hidden_untracked_work_is_not_clean_source(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:
@@ -274,9 +330,42 @@ def test_native_finalization_cannot_disable_retirement_qualification(
     config = replace(config, repos={config.repo_name: replace(
         config.default_repo, pr=replace(config.default_repo.pr, enabled=False),
     )})
-    result = finalize.validate_and_finalize(wid, config)
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_worktrees import pr_authority
+    def unlocked_probe() -> bool:
+        with tracking._RecordLock(path, timeout=0.1, require_sidecar=True), \
+                FinalizeLock(Path(config.default_repo.worktree_root) / ".finalize.lock", timeout=0.1), \
+                pr_authority.guard(timeout=0):
+            return True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        provider.confirm_reconciled_head_v1 = lambda *a, **k: pool.submit(unlocked_probe).result(timeout=3)
+        result = finalize.validate_and_finalize(wid, config)
     assert result is valid
     assert wt.exists() is not valid
+
+
+def test_native_cleanup_invalidates_a_publication_after_prequalification(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from agent_worktrees import hooks
+    config, wid, wt, _remote, path, original, _provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    branch = selected(original).branch
+    head = git_ops.git("rev-parse", "HEAD", cwd=str(wt)).stdout.strip()
+    save = tracking.save_record
+    intervened = False
+    def freeze(record: tracking.WorktreeRecord, *args: Any, **kwargs: Any) -> None:
+        nonlocal intervened
+        save(record, *args, **kwargs)
+        if record.status == "finalizing" and not intervened:
+            intervened = True
+            with hooks.allow_pr_push():
+                assert git_ops.push("origin", f"{head}:refs/heads/{branch}", cwd=config.default_repo.anchor)
+                assert git_ops.push("origin", f":refs/heads/{branch}", cwd=config.default_repo.anchor)
+    monkeypatch.setattr(tracking, "save_record", freeze)
+    assert not finalize.validate_and_finalize(wid, config)
+    assert intervened and wt.exists()
+    assert tracking.load_record(path).status == "active"
 
 
 @pytest.mark.parametrize("change", ["source", "branch", "revision", "owner", "binding", "prepared", "legacy", "expected-head"])
@@ -363,8 +452,94 @@ def test_late_callback_and_stale_stamp_cannot_resurrect_retirement(legacy: Legac
     stale.title = "Unrelated status stamp"
     tracking.save_record(stale)
     fresh = tracking.load_record(path)
-    assert selected(fresh).state == "abandoned"
+    assert selected(fresh).state == "creating" and not selected(fresh).branch
     assert selected(fresh).creation["recovery_contract"]
+
+
+@pytest.mark.parametrize("drop_receipt", [False, True])
+def test_new_wire_disposition_holds_the_actual_unaware_legacy_reader(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str], drop_receipt: bool,
+) -> None:
+    from agent_worktrees import pr_creation_reconcile as recovery, pr_ops
+    config, _wid, _wt, _remote, path, original, provider = legacy
+    assert invoke(legacy, capfd)["success"]
+    wire = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert wire["prs"][0]["creation"]["recovery_branch"] == selected(original).branch
+    if drop_receipt:
+        wire["prs"][0].pop("creation")
+        path.write_text(yaml.safe_dump(wire), encoding="utf-8")
+    report = pr_ops.pr_status(legacy[1], all_prs=True, live=False, config=config)
+    if drop_receipt:
+        assert "local_disposition" not in report
+    else:
+        assert report["local_disposition"] == "retired" and report["publication_outcome"] == "unknown"
+    provider.find_pull_by_head = lambda *a, **k: pytest.fail("unaware healer reassigned the attempt")
+    namespace = runpy.run_path(str(Path(__file__).parent / "fixtures" / "legacy_numberless_pr_healer.py"))
+    heal = cast(Callable[[tracking.WorktreeRecord, cfg.Config], bool], namespace["heal_numberless_active_pr"])
+    unaware = tracking.load_record(path)
+    assert not heal(unaware, config)
+    assert unaware.has_live_pr()
+    assert selected(unaware).pr_id == selected(original).pr_id
+    assert selected(unaware).number is None and not selected(unaware).url
+    if drop_receipt:
+        assert recovery.requires_qualification(selected(unaware)) and not recovery.retired(selected(unaware))
+
+
+def test_preexisting_numberless_abandonment_is_not_reclassified_as_retirement(legacy: Legacy) -> None:
+    from agent_worktrees import finalize_landing, pr_creation_reconcile as recovery
+    config, _wid, _wt, _remote, _path, record, _provider = legacy
+    selected(record).state = "abandoned"
+    selected(record).creation = {}
+    repo = replace(config.default_repo, pr=replace(config.default_repo.pr, enabled=False))
+    assert not recovery.requires_qualification(selected(record))
+    assert not finalize_landing.tracks_pr(record, repo)
+
+
+@pytest.mark.parametrize("status", ["complete", "completed", "pushed"])
+def test_nonfinalized_owner_status_can_reconcile(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str], status: tracking.WorktreeStatus,
+) -> None:
+    record = tracking.load_record(legacy[4])
+    record.status = status
+    tracking.save_record(record)
+    result = invoke(legacy, capfd)
+    assert result["success"] and result["local_disposition"] == "retired", result
+    assert tracking.load_record(legacy[4]).status == status
+
+
+def test_intervening_transport_invalidates_even_restored_remote_absence(
+    legacy: Legacy, capfd: pytest.CaptureFixture[str],
+) -> None:
+    from agent_worktrees import hooks
+    config, _wid, wt, _remote, path, record, provider = legacy
+    branch = selected(record).branch
+    head = git_ops.git("rev-parse", "HEAD", cwd=str(wt)).stdout.strip()
+    def observe(*args: Any, **kwargs: Any) -> bool:
+        with hooks.allow_pr_push():
+            assert git_ops.push("origin", f"{head}:refs/heads/{branch}", cwd=config.default_repo.anchor)
+            assert git_ops.push("origin", f":refs/heads/{branch}", cwd=config.default_repo.anchor)
+        return True
+    provider.confirm_reconciled_head_v1 = observe
+    before = path.read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "during observation" in result["error"]
+    assert path.read_bytes() == before
+
+
+def test_git_probe_timeout_is_bounded_and_structured(
+    legacy: Legacy, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    original = git_ops.git
+    def git(*args: Any, **kwargs: Any) -> Any:
+        if "--no-replace-objects" in args and "status" in args:
+            assert kwargs["timeout"] == 30 and kwargs["kill_tree"] is True
+            raise subprocess.TimeoutExpired("source probe", 30)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(git_ops, "git", git)
+    before = legacy[4].read_bytes()
+    result = invoke(legacy, capfd)
+    assert not result["success"] and "source probe" in result["error"]
+    assert legacy[4].read_bytes() == before
 
 
 def test_observation_cannot_outvote_revision_drift(legacy: Legacy, capfd: pytest.CaptureFixture[str]) -> None:

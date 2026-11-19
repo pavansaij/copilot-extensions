@@ -453,6 +453,10 @@ def create_pr(
             record = tracking.load_record(yaml_path)
         except Exception:
             record = None
+    from . import pr_creation_reconcile
+    error = pr_creation_reconcile.publication_error(record, new=new)
+    if error:
+        return {**base, "error": error}
 
     # Round-22 finding: preflight the same allocation-time policy
     # `_open_via_provider`'s lazy backfill would otherwise only catch too
@@ -626,6 +630,9 @@ def create_pr(
             prcfg, eff_title, worktree_id,
             cwd=worktree_path, machine=config.machine, topic=topic_slug,
         )
+    error = pr_creation_reconcile.publication_error(record, new=new, branch=feature_branch)
+    if error:
+        return {**base, "error": error}
 
     # Branch-name leak class (pr-attribution-codenames Phase 5): whichever way
     # the head above was resolved (explicit --branch, a reused existing-PR
@@ -2299,8 +2306,11 @@ from .pr_pull_forward import pull_forward_recommendation as _pull_forward_recomm
 
 
 def _pr_to_dict(pr: PRRecord) -> dict[str, Any]:
+    from . import pr_creation_reconcile
     return {
         "pr_id": pr.pr_id, "pr_revision": pr.pr_revision, "creation": dict(pr.creation),
+        **({"local_disposition": "retired", "publication_outcome": "unknown"}
+           if pr_creation_reconcile.retired(pr) else {}),
         "state": pr.state,
         "branch": pr.branch,
         "base_sha": pr.base_sha,

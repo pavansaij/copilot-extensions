@@ -893,9 +893,13 @@ def assert_no_live_pr(
     if record is None or not record.prs:
         return True
     reconcile_every_live_pr(record, config)
-    if not record.has_live_pr():
+    from . import pr_creation_reconcile
+    live = [
+        p for p in record.prs if not tracking._pr_is_terminal(p)
+        and not pr_creation_reconcile.retired(p)
+    ]
+    if not live:
         return True
-    live = [p for p in record.prs if not tracking._pr_is_terminal(p)]
     if force:
         output.warn(
             f"Worktree {worktree_id} has {len(live)} still-open tracked PR(s); "

@@ -11,6 +11,7 @@ import pytest
 
 from agent_worktrees import __main__ as cli
 from agent_worktrees import config as cfg, front_door_cli, git_ops, output, pr_complete, tracking
+from agent_worktrees.tracking_lifecycle import create_new_record
 from test_pr_complete import _git, _squash_merge_upstream
 from test_pr_source_publication import publication as publication, publish as source_publish
 
@@ -64,18 +65,54 @@ def test_opt_in_lifecycle_reentrancy_keeps_default_and_peer_exclusion(tmp_path: 
         pass
 
 
+@pytest.mark.parametrize("managed_source", [
+    pytest.param(False, id="unmanaged"), pytest.param(True, id="managed"),
+])
 def test_guarded_publisher_keeps_checkout_lifecycle_through_probes_and_transport(
-    publication: Any, monkeypatch: pytest.MonkeyPatch,
+    publication: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, managed_source: bool,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from agent_worktrees import pr_source_publication, worktree_lifecycle
     from agent_worktrees.git_push_transport import observed_ref
-    path = cfg.tracking_dir() / f"{publication.wid}.yaml"
+    paths = [cfg.tracking_dir() / f"{publication.wid}.yaml"]
+    if managed_source:
+        from machine_transport import detect_platform
+        from agent_worktrees import execution_spaces, pr_publication_checks
+        manager = tmp_path / "source-manager"
+        manager.mkdir()
+        directory = manager / "worktrees"
+        cfg.tracking_dir().rename(directory)
+        monkeypatch.setattr(cfg, "tracking_dir", lambda *_: directory)
+        monkeypatch.setattr(cfg, "project_dir", lambda *_: manager)
+        publication.caller = replace(publication.caller, platform=detect_platform())
+        monkeypatch.setattr(cfg, "load_config", lambda *a, **k: publication.caller)
+        paths[0] = directory / f"{publication.wid}.yaml"
+        source_id = "managed-source-owner"
+        root = Path(publication.caller.default_repo.worktree_root) / source_id
+        branch = "users/demo/managed-source"
+        git_ops.git("worktree", "add", "-b", branch, str(root), "origin/master",
+                    cwd=publication.caller.default_repo.anchor)
+        (root / "source.txt").write_text("source-only\n")
+        git_ops.git("add", "source.txt", cwd=str(root))
+        git_ops.git("commit", "-m", "Managed source candidate", cwd=str(root))
+        source_record = create_new_record(
+            source_id, branch, str(root), publication.caller.repo_name,
+            publication.caller.machine, publication.caller.platform, cfg.tracking_dir(),
+        )
+        execution_spaces.require_record_mutation(source_record, publication.caller, recover_receiving=False)
+        publication.workspace, publication.branch = root, branch
+        publication.head = git_ops.git("rev-parse", "HEAD", cwd=str(root)).stdout.strip()
+        pr_publication_checks.record_self_review(
+            root, "origin/master", publication.target.pr.publication_checks,
+            lenses=["source"], summary="reviewed exact managed source",
+        )
+        paths.append(cfg.tracking_dir() / f"{source_id}.yaml")
     original_probe, original_push = observed_ref, git_ops.push
     phases: list[str] = []
     def blocked() -> None:
-        with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
-            pytest.fail("publisher lost lifecycle exclusion")
+        for path in paths:
+            with pytest.raises(TimeoutError), worktree_lifecycle.guard(path, timeout=0):
+                pytest.fail("publisher lost caller or actual source lifecycle exclusion")
     with ThreadPoolExecutor(max_workers=1) as pool:
         def probe(*args: Any, **kwargs: Any) -> Any:
             pool.submit(blocked).result(timeout=3)
@@ -90,8 +127,9 @@ def test_guarded_publisher_keeps_checkout_lifecycle_through_probes_and_transport
         result = cast(Callable[..., dict[str, Any]], source_publish)(publication)
     assert result["ok"], result
     assert "probe" in phases and "transport" in phases
-    with worktree_lifecycle.guard(path, timeout=0):
-        pass
+    for path in paths:
+        with worktree_lifecycle.guard(path, timeout=0):
+            pass
 
 
 def test_guarded_completion_keeps_checkout_lifecycle_during_real_fetch(
